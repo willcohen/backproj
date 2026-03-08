@@ -2,7 +2,7 @@
 
 **[Live Demo](https://willcohen.github.io/backproj/)**
 
-Display any map projection in a web map. Projection math powered by [proj-wasm](https://www.npmjs.com/package/proj-wasm) (PROJ 9 compiled to WebAssembly).
+Display any map projection in a web map. Projection math powered by [proj-wasm](https://www.npmjs.com/package/proj-wasm) (PROJ 9 transpiled to WebAssembly).
 
 ## EARLY DEVELOPMENT
 

@@ -50,6 +50,39 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 #sidebar h1 { font-size: 18px; margin-bottom: 12px; font-weight: 600; }
 
+#sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+#sidebar-header h1 { margin-bottom: 0; }
+#sidebar-toggle {
+  background: none;
+  border: none;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 8px;
+  color: #1565c0;
+  line-height: 1;
+  font-weight: 600;
+}
+#sidebar-toggle:hover { color: #0d47a1; }
+#sidebar.collapsed { padding: 10px 16px; width: auto; min-width: 0; }
+#sidebar.collapsed #sidebar-body { display: none; }
+#sidebar.collapsed #sidebar-header h1 { display: none; }
+#sidebar-collapsed-info {
+  display: none;
+  font-size: 12px;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+#sidebar-collapsed-info .collapsed-crs { font-weight: 600; }
+#sidebar.collapsed #sidebar-collapsed-info { display: block; }
+
 label {
   display: block;
   font-size: 12px;
@@ -229,7 +262,12 @@ summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #555; }
 <div id="map"></div>
 
 <div id="sidebar">
-  <h1>PROJ on Web Maps</h1>
+  <div id="sidebar-header">
+    <h1>PROJ on Web Maps</h1>
+    <span id="sidebar-collapsed-info"><span class="collapsed-crs"></span></span>
+    <button id="sidebar-toggle" title="Collapse panel">Hide</button>
+  </div>
+  <div id="sidebar-body">
 
   <!-- CRS Selector -->
   <label>Projection</label>
@@ -298,6 +336,7 @@ map.fitBounds(bounds);</code></pre>
       <p><a href="https://github.com/willcohen/backproj">Source on GitHub</a></p>
     </div>
   </details>
+  </div>
 </div>
 
 <script type="module">
@@ -924,6 +963,22 @@ async function loadDefaultLayers() {
 document.getElementById('reset-defaults').addEventListener('click', async () => {
   window.location.hash = '';
   await loadDefaultLayers();
+});
+
+document.getElementById('sidebar-toggle').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const sidebar = document.getElementById('sidebar');
+  const toggle = document.getElementById('sidebar-toggle');
+  const collapsedCrs = document.querySelector('#sidebar-collapsed-info .collapsed-crs');
+  sidebar.classList.toggle('collapsed');
+  if (sidebar.classList.contains('collapsed')) {
+    toggle.textContent = 'Show';
+    toggle.title = 'Expand panel';
+    collapsedCrs.textContent = state.currentCRS;
+  } else {
+    toggle.textContent = 'Hide';
+    toggle.title = 'Collapse panel';
+  }
 });
 
 init().catch(err => {
