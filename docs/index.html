@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROJ on Web Maps</title>
+<script>
+  if ('caches' in window) {
+    caches.keys().then(names => names.forEach(n => caches.delete(n)));
+  }
+  window.coi = {
+    shouldRegister: () => localStorage.getItem('coi-disabled') !== 'true',
+    shouldDeregister: () => localStorage.getItem('coi-disabled') === 'true',
+    quiet: false
+  };
+</script>
+<script src="coi-serviceworker.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.19.0/dist/maplibre-gl.css">
+<script type="importmap">
+{
+  "imports": {
+    "cherry-cljs/cljs.core.js": "https://cdn.jsdelivr.net/npm/cherry-cljs@0.5.33/lib/cljs.core.js",
+    "cherry-cljs/lib/clojure.string.js": "https://cdn.jsdelivr.net/npm/cherry-cljs@0.5.33/lib/clojure.string.js",
+    "resource-tracker": "https://cdn.jsdelivr.net/npm/resource-tracker@0.0.1-alpha1/resource.mjs",
+    "proj-wasm": "https://cdn.jsdelivr.net/npm/proj-wasm@0.1.0-alpha7/dist/proj.mjs",
+    "maplibre-gl": "https://esm.sh/maplibre-gl@5.19.0?bundle-deps",
+    "backproj": "https://cdn.jsdelivr.net/npm/backproj@0.0.1/dist/backproj.mjs",
+    "maplibre-proj": "https://cdn.jsdelivr.net/npm/maplibre-proj@0.0.1/dist/maplibre-proj.mjs"
+  }
+}
+</script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+#map { position: absolute; inset: 0; }
+
+#sidebar {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  width: 340px;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  z-index: 10;
+  max-height: calc(100vh - 20px);
+  overflow-y: auto;
+}
+
+#sidebar h1 { font-size: 18px; margin-bottom: 12px; font-weight: 600; }
+
+label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+  margin-bottom: 4px;
+  margin-top: 12px;
+}
+
+.section { margin-top: 16px; border-top: 1px solid #eee; padding-top: 12px; }
+
+input[type="text"], textarea {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 13px;
+  background: white;
+  font-family: inherit;
+}
+
+textarea { resize: vertical; min-height: 60px; }
+
+button {
+  padding: 6px 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #f5f5f5;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+button:hover { background: #e8e8e8; }
+
+.btn-row { display: flex; gap: 4px; margin-top: 6px; }
+.btn-row.mode-toggle { margin-bottom: 8px; }
+.btn-row.mode-toggle button { flex: 1; }
+.btn-row.mode-toggle button.active {
+  background: #1565c0;
+  color: white;
+  border-color: #1565c0;
+}
+
+.input-row { display: flex; gap: 4px; }
+.input-row input, .input-row textarea { flex: 1; }
+
+/* CRS dropdown */
+.crs-search-wrap { position: relative; }
+.crs-search-row { display: flex; gap: 4px; }
+.crs-search-row input { flex: 1; }
+
+.crs-browse-btn {
+  padding: 6px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #f5f5f5;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.crs-dropdown {
+  display: none;
+  position: fixed;
+  max-height: 300px;
+  overflow-y: auto;
+  background: white;
+  border: 1px solid #ccc;
+  border-radius: 0 0 4px 4px;
+  z-index: 1000;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+.crs-dropdown-item {
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.crs-dropdown-item:hover, .crs-dropdown-item.active { background: #e3f2fd; }
+.crs-dropdown-item .crs-code { font-weight: 600; margin-right: 6px; }
+.crs-dropdown-item .crs-name { color: #666; }
+
+/* CRS chip */
+.crs-chip {
+  display: none;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #e3f2fd;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.crs-chip .crs-chip-code { font-weight: 600; }
+.crs-chip .crs-chip-name { color: #666; margin-left: 4px; }
+
+/* Layer list */
+.layer-list { margin-top: 6px; }
+.layer-entry {
+  padding: 6px 0;
+  font-size: 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.layer-entry .layer-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.layer-entry .layer-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.layer-entry button { padding: 2px 6px; font-size: 11px; }
+.layer-entry .layer-url-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 3px;
+}
+.layer-entry .layer-url {
+  flex: 1;
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  font-family: monospace;
+  color: #555;
+}
+.layer-entry .layer-url:focus { border-color: #1565c0; outline: none; }
+.layer-entry .layer-style-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11px;
+  color: #666;
+}
+.layer-entry .layer-style-row label { display: inline; font-size: 11px; font-weight: normal; color: #666; margin: 0; }
+.layer-entry .layer-style-row input[type="color"] {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  cursor: pointer;
+  background: none;
+}
+.layer-entry .layer-style-row input[type="range"] {
+  width: 50px;
+  cursor: pointer;
+}
+
+/* Status */
+#loading {
+  display: none;
+  margin-top: 8px;
+  padding: 8px;
+  background: #e3f2fd;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #1565c0;
+}
+#error {
+  display: none;
+  margin-top: 8px;
+  padding: 8px;
+  background: #ffebee;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #c62828;
+  word-break: break-word;
+}
+
+details { margin-top: 14px; border-top: 1px solid #eee; padding-top: 10px; }
+summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #555; }
+.about-content { margin-top: 8px; font-size: 12px; line-height: 1.5; color: #666; }
+.about-content p { margin-bottom: 6px; }
+.about-content a { color: #1565c0; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="sidebar">
+  <h1>PROJ on Web Maps</h1>
+
+  <!-- CRS Selector -->
+  <label>Projection</label>
+  <div class="btn-row mode-toggle">
+    <button id="mode-browse" class="active">Browse Database</button>
+    <button id="mode-manual">Manual Input</button>
+  </div>
+
+  <!-- Browse Database mode -->
+  <div id="browse-mode">
+    <div class="crs-search-wrap">
+      <div class="crs-search-row">
+        <input type="text" id="crs-search" placeholder="Search projected CRS...">
+        <button class="crs-browse-btn" id="crs-browse" type="button">&#9662;</button>
+      </div>
+      <div class="crs-dropdown" id="crs-dropdown"></div>
+    </div>
+    <div class="crs-chip" id="crs-chip">
+      <span class="crs-chip-code" id="crs-chip-code"></span>
+      <span class="crs-chip-name" id="crs-chip-name"></span>
+    </div>
+  </div>
+
+  <!-- Manual Input mode -->
+  <div id="manual-mode" style="display:none">
+    <textarea id="crs-input" placeholder="EPSG:xxxx, +proj=..., WKT, or PROJJSON"></textarea>
+    <div class="btn-row">
+      <button id="crs-apply">Apply</button>
+      <button id="crs-upload-btn">Upload .prj</button>
+      <input type="file" id="crs-file" accept=".prj,.wkt" style="display:none">
+    </div>
+  </div>
+
+  <div id="loading">Loading projection...</div>
+  <div id="error"></div>
+
+  <!-- Layers -->
+  <div class="section">
+    <label>GeoJSON Layers</label>
+    <div class="layer-list" id="layer-list"></div>
+    <div class="input-row" style="margin-top:6px">
+      <input type="text" id="layer-url" placeholder="GeoJSON URL">
+      <button id="layer-add-url">Add</button>
+    </div>
+    <div class="btn-row" style="margin-top:4px">
+      <button id="layer-upload-btn">Upload File</button>
+      <input type="file" id="layer-file" accept=".geojson,.json" style="display:none">
+      <button id="reset-defaults" style="margin-left:auto">Reset</button>
+    </div>
+  </div>
+
+  <details>
+    <summary>About</summary>
+    <div class="about-content">
+      <p>Display web maps in any CRS available in
+      <a href="https://proj.org/">PROJ</a>, using
+      <a href="https://www.npmjs.com/package/proj-wasm">proj-wasm</a>
+      for in-browser projection math.</p>
+      <p>MapLibre integration via
+      <a href="https://github.com/willcohen/backproj/tree/main/packages/maplibre-proj">maplibre-proj</a>:</p>
+      <pre><code>const { style, bounds } = await reprojectStyle({
+  style, crs: 'EPSG:5070',
+});
+map.setStyle(style);
+map.fitBounds(bounds);</code></pre>
+      <p><a href="https://github.com/willcohen/backproj">Source on GitHub</a></p>
+    </div>
+  </details>
+</div>
+
+<script type="module">
+import { Map as MapGL } from 'maplibre-gl';
+import { reprojectStyle } from 'maplibre-proj';
+import * as proj from 'proj-wasm';
+import { transformCoords, initProj } from 'backproj';
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+const state = {
+  map: null,
+  transformer: null,
+  currentCRS: 'EPSG:5070',
+  layers: [],
+  projectedCRS: [],
+  nextLayerId: 0,
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function showLoading(msg) {
+  const el = document.getElementById('loading');
+  el.textContent = msg || 'Loading...';
+  el.style.display = '';
+}
+
+function hideLoading() {
+  document.getElementById('loading').style.display = 'none';
+}
+
+function showError(msg) {
+  const el = document.getElementById('error');
+  el.textContent = msg;
+  el.style.display = '';
+}
+
+function clearError() {
+  document.getElementById('error').style.display = 'none';
+}
+
+function detectGeomType(fc) {
+  for (const f of fc.features) {
+    if (!f.geometry) continue;
+    const t = f.geometry.type;
+    if (t === 'LineString' || t === 'MultiLineString') return 'line';
+    if (t === 'Point' || t === 'MultiPoint') return 'point';
+    if (t === 'Polygon' || t === 'MultiPolygon') return 'polygon';
+  }
+  return 'polygon';
+}
+
+// ---------------------------------------------------------------------------
+// Map integration
+// ---------------------------------------------------------------------------
+async function updateMap(crsString) {
+  clearError();
+  showLoading('Reprojecting...');
+
+  try {
+    const sources = {};
+    const layers = [
+      { id: 'background', type: 'background', paint: { 'background-color': '#aad3df' } },
+    ];
+    for (const layer of state.layers) {
+      sources[layer.id] = { type: 'geojson', data: layer.data };
+      const geomType = detectGeomType(layer.data);
+      const { fill, stroke, opacity } = layer.style;
+      if (geomType === 'point') {
+        layers.push({
+          id: layer.id + '-circle',
+          source: layer.id,
+          type: 'circle',
+          paint: { 'circle-color': stroke, 'circle-radius': 5, 'circle-opacity': opacity, 'circle-stroke-width': 1, 'circle-stroke-color': '#fff' },
+        });
+      } else if (geomType === 'line') {
+        layers.push({
+          id: layer.id + '-line',
+          source: layer.id,
+          type: 'line',
+          paint: { 'line-color': stroke, 'line-width': 1, 'line-opacity': opacity },
+        });
+      } else {
+        layers.push({
+          id: layer.id + '-fill',
+          source: layer.id,
+          type: 'fill',
+          paint: { 'fill-color': fill, 'fill-opacity': opacity, 'fill-outline-color': stroke },
+        });
+      }
+    }
+    const inputStyle = { version: 8, sources, layers };
+
+    const { style, bounds, transformer } = await reprojectStyle({
+      style: inputStyle,
+      crs: crsString,
+    });
+
+    state.transformer = transformer;
+    state.currentCRS = crsString;
+
+    if (state.map) {
+      state.map.setStyle(style);
+      state.map.once('styledata', () => {
+        state.map.fitBounds(bounds, { animate: false });
+      });
+    } else {
+      state.map = new MapGL({
+        container: 'map',
+        style,
+        projection: { type: 'mercator' },
+        renderWorldCopies: false,
+      });
+      state.map.on('load', () => state.map.fitBounds(bounds, { animate: false }));
+    }
+
+    window.location.hash = `crs=${encodeURIComponent(crsString)}`;
+    hideLoading();
+  } catch (err) {
+    hideLoading();
+    showError(`Error: ${err.message}`);
+    console.error(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Layer management
+// ---------------------------------------------------------------------------
+const DEFAULT_FILLS = ['#f2efe9', '#d4e6f1', '#d5f5e3', '#fdebd0', '#e8daef', '#fadbd8'];
+const DEFAULT_STROKES = ['#9e9cab', '#2980b9', '#27ae60', '#e67e22', '#8e44ad', '#c0392b'];
+
+function addLayer(name, data, url) {
+  const id = 'layer-' + (state.nextLayerId++);
+  const ci = state.layers.length % DEFAULT_FILLS.length;
+  state.layers.push({
+    id, name, data, url: url || '',
+    style: { fill: DEFAULT_FILLS[ci], stroke: DEFAULT_STROKES[ci], opacity: 1 },
+  });
+  renderLayerList();
+  return id;
+}
+
+function removeLayer(id) {
+  state.layers = state.layers.filter(l => l.id !== id);
+  renderLayerList();
+  updateMap(state.currentCRS);
+}
+
+async function zoomToLayer(id) {
+  const layer = state.layers.find(l => l.id === id);
+  if (!layer || !state.transformer || !state.map) return;
+
+  const allCoords = [];
+  for (const f of layer.data.features) {
+    if (f.geometry) collectBBox(f.geometry, allCoords);
+  }
+  if (allCoords.length === 0) return;
+
+  try {
+    const reprojected = await transformCoords(allCoords, state.transformer);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [x, y] of reprojected) {
+      if (!isFinite(x) || !isFinite(y)) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    if (isFinite(minX)) {
+      state.map.fitBounds([[minX, minY], [maxX, maxY]], { animate: true, padding: 20 });
+    }
+  } catch (err) {
+    console.error('zoomToLayer failed:', err);
+    showError(`Zoom failed: ${err.message}`);
+  }
+}
+
+function collectBBox(geom, out) {
+  switch (geom.type) {
+    case 'Point': out.push([geom.coordinates[0], geom.coordinates[1]]); break;
+    case 'MultiPoint': case 'LineString':
+      for (const p of geom.coordinates) out.push([p[0], p[1]]); break;
+    case 'MultiLineString': case 'Polygon':
+      for (const ring of geom.coordinates) for (const p of ring) out.push([p[0], p[1]]); break;
+    case 'MultiPolygon':
+      for (const poly of geom.coordinates) for (const ring of poly) for (const p of ring) out.push([p[0], p[1]]); break;
+    case 'GeometryCollection':
+      for (const child of geom.geometries) collectBBox(child, out); break;
+  }
+}
+
+
+async function reloadLayer(id) {
+  const layer = state.layers.find(l => l.id === id);
+  if (!layer || !layer.url) return;
+  try {
+    showLoading('Reloading ' + layer.name + '...');
+    const resp = await fetch(layer.url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (data.type !== 'FeatureCollection') throw new Error('Expected a FeatureCollection');
+    layer.data = data;
+    layer.name = layer.url.split('/').pop() || layer.name;
+    hideLoading();
+    renderLayerList();
+    updateMap(state.currentCRS);
+  } catch (err) {
+    hideLoading();
+    showError(`Failed to reload: ${err.message}`);
+  }
+}
+
+function renderLayerList() {
+  const container = document.getElementById('layer-list');
+  container.innerHTML = '';
+  for (let li = 0; li < state.layers.length; li++) {
+    const layer = state.layers[li];
+    const entry = document.createElement('div');
+    entry.className = 'layer-entry';
+    entry.draggable = true;
+    entry.dataset.idx = li;
+
+    entry.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', li);
+      entry.style.opacity = '0.4';
+    });
+    entry.addEventListener('dragend', () => { entry.style.opacity = ''; });
+    entry.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      entry.style.borderTop = '2px solid #1565c0';
+    });
+    entry.addEventListener('dragleave', () => { entry.style.borderTop = ''; });
+    entry.addEventListener('drop', (e) => {
+      e.preventDefault();
+      entry.style.borderTop = '';
+      const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
+      const toIdx = li;
+      if (fromIdx === toIdx) return;
+      const [moved] = state.layers.splice(fromIdx, 1);
+      state.layers.splice(toIdx, 0, moved);
+      renderLayerList();
+      updateMap(state.currentCRS);
+    });
+
+    const header = document.createElement('div');
+    header.className = 'layer-header';
+    const dragHandle = document.createElement('span');
+    dragHandle.textContent = '\u2261';
+    dragHandle.style.cssText = 'cursor: grab; font-size: 16px; color: #999; margin-right: 2px;';
+    header.appendChild(dragHandle);
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'layer-name';
+    nameSpan.title = layer.name;
+    nameSpan.textContent = layer.name;
+    header.appendChild(nameSpan);
+
+    const zoomBtn = document.createElement('button');
+    zoomBtn.textContent = 'Zoom';
+    zoomBtn.addEventListener('click', () => zoomToLayer(layer.id));
+    header.appendChild(zoomBtn);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.textContent = 'x';
+    removeBtn.addEventListener('click', () => removeLayer(layer.id));
+    header.appendChild(removeBtn);
+
+    entry.appendChild(header);
+
+    const styleRow = document.createElement('div');
+    styleRow.className = 'layer-style-row';
+
+    const fillLabel = document.createElement('label');
+    fillLabel.textContent = 'Fill';
+    styleRow.appendChild(fillLabel);
+    const fillPicker = document.createElement('input');
+    fillPicker.type = 'color';
+    fillPicker.value = layer.style.fill;
+    fillPicker.addEventListener('input', () => {
+      layer.style.fill = fillPicker.value;
+      updateMap(state.currentCRS);
+    });
+    styleRow.appendChild(fillPicker);
+
+    const strokeLabel = document.createElement('label');
+    strokeLabel.textContent = 'Stroke';
+    styleRow.appendChild(strokeLabel);
+    const strokePicker = document.createElement('input');
+    strokePicker.type = 'color';
+    strokePicker.value = layer.style.stroke;
+    strokePicker.addEventListener('input', () => {
+      layer.style.stroke = strokePicker.value;
+      updateMap(state.currentCRS);
+    });
+    styleRow.appendChild(strokePicker);
+
+    const opLabel = document.createElement('label');
+    opLabel.textContent = 'Op';
+    styleRow.appendChild(opLabel);
+    const opSlider = document.createElement('input');
+    opSlider.type = 'range';
+    opSlider.min = '0';
+    opSlider.max = '1';
+    opSlider.step = '0.05';
+    opSlider.value = layer.style.opacity;
+    opSlider.addEventListener('input', () => {
+      layer.style.opacity = parseFloat(opSlider.value);
+      updateMap(state.currentCRS);
+    });
+    styleRow.appendChild(opSlider);
+
+    entry.appendChild(styleRow);
+
+    const urlRow = document.createElement('div');
+    urlRow.className = 'layer-url-row';
+    const urlInput = document.createElement('input');
+    urlInput.type = 'text';
+    urlInput.className = 'layer-url';
+    urlInput.value = layer.url;
+    urlInput.placeholder = 'No URL (uploaded file)';
+    urlInput.addEventListener('change', () => { layer.url = urlInput.value.trim(); });
+    urlRow.appendChild(urlInput);
+
+    const reloadBtn = document.createElement('button');
+    reloadBtn.textContent = 'Reload';
+    reloadBtn.addEventListener('click', () => reloadLayer(layer.id));
+    urlRow.appendChild(reloadBtn);
+
+    entry.appendChild(urlRow);
+    container.appendChild(entry);
+  }
+}
+
+// Add URL
+document.getElementById('layer-add-url').addEventListener('click', async () => {
+  const urlInput = document.getElementById('layer-url');
+  const url = urlInput.value.trim();
+  if (!url) return;
+  try {
+    showLoading('Fetching GeoJSON...');
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (data.type !== 'FeatureCollection') throw new Error('Expected a FeatureCollection');
+    const name = url.split('/').pop() || 'Layer';
+    addLayer(name, data, url);
+    urlInput.value = '';
+    hideLoading();
+    updateMap(state.currentCRS);
+  } catch (err) {
+    hideLoading();
+    showError(`Failed to load URL: ${err.message}`);
+  }
+});
+
+// Upload file
+document.getElementById('layer-upload-btn').addEventListener('click', () => {
+  document.getElementById('layer-file').click();
+});
+document.getElementById('layer-file').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (data.type !== 'FeatureCollection') throw new Error('Expected a FeatureCollection');
+      addLayer(file.name, data);
+      updateMap(state.currentCRS);
+    } catch (err) {
+      showError(`Failed to parse file: ${err.message}`);
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+});
+
+// ---------------------------------------------------------------------------
+// CRS selector - mode toggle
+// ---------------------------------------------------------------------------
+const browseMode = document.getElementById('browse-mode');
+const manualMode = document.getElementById('manual-mode');
+const modeBrowseBtn = document.getElementById('mode-browse');
+const modeManualBtn = document.getElementById('mode-manual');
+
+modeBrowseBtn.addEventListener('click', () => {
+  browseMode.style.display = '';
+  manualMode.style.display = 'none';
+  modeBrowseBtn.classList.add('active');
+  modeManualBtn.classList.remove('active');
+});
+
+modeManualBtn.addEventListener('click', () => {
+  browseMode.style.display = 'none';
+  manualMode.style.display = '';
+  modeManualBtn.classList.add('active');
+  modeBrowseBtn.classList.remove('active');
+});
+
+// ---------------------------------------------------------------------------
+// CRS selector - manual input
+// ---------------------------------------------------------------------------
+const crsInput = document.getElementById('crs-input');
+const crsApply = document.getElementById('crs-apply');
+
+function applyManualCRS() {
+  const val = crsInput.value.trim();
+  if (!val) return;
+
+  crsChipCode.textContent = val;
+  crsChipName.textContent = '';
+  crsChip.style.display = 'block';
+
+  browseMode.style.display = '';
+  manualMode.style.display = 'none';
+  modeBrowseBtn.classList.add('active');
+  modeManualBtn.classList.remove('active');
+
+  updateMap(val);
+}
+
+crsApply.addEventListener('click', applyManualCRS);
+crsInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); applyManualCRS(); }
+});
+
+// .prj file upload
+document.getElementById('crs-upload-btn').addEventListener('click', () => {
+  document.getElementById('crs-file').click();
+});
+document.getElementById('crs-file').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    crsInput.value = reader.result.trim();
+    applyManualCRS();
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+});
+
+// ---------------------------------------------------------------------------
+// CRS selector - browse database
+// ---------------------------------------------------------------------------
+const crsSearchInput = document.getElementById('crs-search');
+const crsBrowseBtn = document.getElementById('crs-browse');
+const crsDropdown = document.getElementById('crs-dropdown');
+const crsChip = document.getElementById('crs-chip');
+const crsChipCode = document.getElementById('crs-chip-code');
+const crsChipName = document.getElementById('crs-chip-name');
+
+let debounceTimer = null;
+let activeIdx = -1;
+let filtered = [];
+
+function filterCatalog(query) {
+  const q = query.toLowerCase();
+  const results = [];
+  for (const e of state.projectedCRS) {
+    if (e.deprecated) continue;
+    const id = `${e.auth_name}:${e.code}`.toLowerCase();
+    const name = (e.name || '').toLowerCase();
+    if (q && !id.includes(q) && !name.includes(q)) continue;
+    results.push(e);
+    if (results.length >= 50) break;
+  }
+  return results;
+}
+
+function renderDropdown() {
+  crsDropdown.innerHTML = '';
+  if (filtered.length === 0) { crsDropdown.style.display = 'none'; return; }
+  for (let i = 0; i < filtered.length; i++) {
+    const entry = filtered[i];
+    const item = document.createElement('div');
+    item.className = 'crs-dropdown-item' + (i === activeIdx ? ' active' : '');
+    const code = `${entry.auth_name}:${entry.code}`;
+    item.innerHTML = `<span class="crs-code">${escapeHtml(code)}</span><span class="crs-name">${escapeHtml(entry.name || '')}</span>`;
+    item.addEventListener('mousedown', (e) => { e.preventDefault(); selectCRS(i); });
+    crsDropdown.appendChild(item);
+  }
+  const rect = crsSearchInput.parentElement.getBoundingClientRect();
+  crsDropdown.style.left = rect.left + 'px';
+  crsDropdown.style.top = rect.bottom + 'px';
+  crsDropdown.style.width = rect.width + 'px';
+  crsDropdown.style.display = 'block';
+}
+
+function selectCRS(idx) {
+  if (idx < 0 || idx >= filtered.length) return;
+  const entry = filtered[idx];
+  const code = `${entry.auth_name}:${entry.code}`;
+  crsDropdown.style.display = 'none';
+  crsSearchInput.value = '';
+
+  crsChipCode.textContent = code;
+  crsChipName.textContent = entry.name || '';
+  crsChip.style.display = 'block';
+
+  updateMap(code);
+}
+
+function doFilter(showAll) {
+  const q = crsSearchInput.value.trim();
+  if (!showAll && !q) { crsDropdown.style.display = 'none'; return; }
+  filtered = filterCatalog(q);
+  activeIdx = -1;
+  renderDropdown();
+}
+
+crsSearchInput.addEventListener('input', () => {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => doFilter(false), 200);
+});
+
+crsSearchInput.addEventListener('keydown', (e) => {
+  if (crsDropdown.style.display === 'none' || filtered.length === 0) return;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    activeIdx = Math.min(activeIdx + 1, filtered.length - 1);
+    renderDropdown();
+    crsDropdown.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    activeIdx = Math.max(activeIdx - 1, 0);
+    renderDropdown();
+    crsDropdown.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter' && activeIdx >= 0) {
+    e.preventDefault();
+    selectCRS(activeIdx);
+  } else if (e.key === 'Escape') {
+    crsDropdown.style.display = 'none';
+    activeIdx = -1;
+  }
+});
+
+crsSearchInput.addEventListener('blur', () => {
+  setTimeout(() => { crsDropdown.style.display = 'none'; }, 200);
+});
+
+crsSearchInput.addEventListener('focus', () => {
+  if (crsSearchInput.value.trim()) doFilter(false);
+});
+
+crsBrowseBtn.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  if (crsDropdown.style.display === 'block') {
+    crsDropdown.style.display = 'none';
+  } else {
+    crsSearchInput.focus();
+    doFilter(true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+const NE_GRATICULES_URL =
+  'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_graticules_10.geojson';
+const NE_LAND_URL =
+  'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_land.geojson';
+const NE_COUNTRIES_URL =
+  'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_countries.geojson';
+const NE_PROVINCES_URL =
+  'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_1_states_provinces.geojson';
+
+async function init() {
+  showLoading('Initializing proj-wasm...');
+
+  await initProj();
+
+  // Load CRS catalog
+  const catalog = await proj.getCrsInfoListFromDatabase({ auth_name: '', types: [15] });
+  state.projectedCRS = catalog.filter(e => !e.deprecated);
+
+  await loadDefaultLayers();
+}
+
+async function loadDefaultLayers() {
+  showLoading('Loading Natural Earth data...');
+  state.layers = [];
+  state.nextLayerId = 0;
+  try {
+    const [landResp, gratResp, countriesResp, provincesResp] = await Promise.all([
+      fetch(NE_LAND_URL),
+      fetch(NE_GRATICULES_URL),
+      fetch(NE_COUNTRIES_URL),
+      fetch(NE_PROVINCES_URL),
+    ]);
+    if (!landResp.ok) throw new Error(`Land HTTP ${landResp.status}`);
+    if (!gratResp.ok) throw new Error(`Graticules HTTP ${gratResp.status}`);
+    if (!countriesResp.ok) throw new Error(`Countries HTTP ${countriesResp.status}`);
+    if (!provincesResp.ok) throw new Error(`Provinces HTTP ${provincesResp.status}`);
+    const [landData, gratData, countriesData, provincesData] = await Promise.all([
+      landResp.json(), gratResp.json(), countriesResp.json(), provincesResp.json(),
+    ]);
+    addLayer('Land', landData, NE_LAND_URL);
+    addLayer('Graticules', gratData, NE_GRATICULES_URL);
+    addLayer('Countries', countriesData, NE_COUNTRIES_URL);
+    addLayer('Provinces', provincesData, NE_PROVINCES_URL);
+  } catch (err) {
+    showError(`Failed to load default layers: ${err.message}`);
+  }
+
+  const DEFAULT_CRS = 'EPSG:5070';
+  const hashMatch = window.location.hash.match(/crs=([^&]+)/);
+  const initialCRS = hashMatch ? decodeURIComponent(hashMatch[1]) : DEFAULT_CRS;
+
+  const initialEntry = state.projectedCRS.find(e => `${e.auth_name}:${e.code}` === initialCRS);
+  crsChipCode.textContent = initialCRS;
+  crsChipName.textContent = initialEntry ? (initialEntry.name || '') : '';
+  crsChip.style.display = 'block';
+
+  hideLoading();
+  await updateMap(initialCRS);
+}
+
+document.getElementById('reset-defaults').addEventListener('click', async () => {
+  window.location.hash = '';
+  await loadDefaultLayers();
+});
+
+init().catch(err => {
+  hideLoading();
+  showError(`Init failed: ${err.message}`);
+  console.error('Init failed:', err);
+});
+</script>
+</body>
+</html>

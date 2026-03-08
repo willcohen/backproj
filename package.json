@@ -1,0 +1,9 @@
+{
+  "name": "backproj-monorepo",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "check": "npm run check --workspaces"
+  }
+}

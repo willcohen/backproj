@@ -1,0 +1,30 @@
+{
+  "name": "backproj",
+  "version": "0.0.1",
+  "description": "Reproject coordinates through any CRS via proj-wasm",
+  "type": "module",
+  "main": "dist/backproj.mjs",
+  "module": "dist/backproj.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/backproj.mjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --external:proj-wasm --outfile=dist/backproj.mjs",
+    "check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "proj-wasm": ">=0.1.0-alpha7"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0",
+    "@types/geojson": "^7946.0.14",
+    "proj-wasm": "^0.1.0-alpha7"
+  },
+  "license": "MIT"
+}
