@@ -1676,22 +1676,6 @@ document.getElementById('sidebar-toggle').addEventListener('click', (e) => {
   }
 });
 
-document.getElementById('sidebar-toggle').addEventListener('click', (e) => {
-  e.stopPropagation();
-  const sidebar = document.getElementById('sidebar');
-  const toggle = document.getElementById('sidebar-toggle');
-  const collapsedCrs = document.querySelector('#sidebar-collapsed-info .collapsed-crs');
-  sidebar.classList.toggle('collapsed');
-  if (sidebar.classList.contains('collapsed')) {
-    toggle.textContent = 'Show';
-    toggle.title = 'Expand panel';
-    collapsedCrs.textContent = state.currentCRS;
-  } else {
-    toggle.textContent = 'Hide';
-    toggle.title = 'Collapse panel';
-  }
-});
-
 init().catch(err => {
   hideLoading();
   showError(`Init failed: ${err.message}`);
