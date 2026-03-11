@@ -7,8 +7,7 @@ Display any map projection in a web map. Projection math powered by [proj-wasm](
 ## EARLY DEVELOPMENT
 
 This project is in its initial phases. APIs and package structure may
-change substantially. Currently supports GeoJSON reprojection only;
-MVT (vector tile) reprojection is planned for a future phase.
+change substantially. Currently supports GeoJSON and MVT reprojection.
 
 ## Packages
 
