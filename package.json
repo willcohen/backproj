@@ -4,6 +4,8 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "build": "npm run build --workspaces",
-    "check": "npm run check --workspaces"
+    "build:dev": "npm run build:dev --workspace=packages/backproj && npm run build:dev --workspace=packages/maplibre-proj",
+    "check": "npm run check --workspaces",
+    "serve": "npx http-server -p 8000 --cors"
   }
 }

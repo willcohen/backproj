@@ -5,9 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PROJ on Web Maps</title>
 <script>
-  if ('caches' in window) {
-    caches.keys().then(names => names.forEach(n => caches.delete(n)));
-  }
   window.coi = {
     shouldRegister: () => localStorage.getItem('coi-disabled') !== 'true',
     shouldDeregister: () => localStorage.getItem('coi-disabled') === 'true',
@@ -15,7 +12,7 @@
   };
 </script>
 <script src="coi-serviceworker.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.19.0/dist/maplibre-gl.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.20.0/dist/maplibre-gl.css">
 <script type="importmap">
 {
   "imports": {
@@ -23,14 +20,20 @@
     "cherry-cljs/lib/clojure.string.js": "https://cdn.jsdelivr.net/npm/cherry-cljs@0.5.33/lib/clojure.string.js",
     "resource-tracker": "https://cdn.jsdelivr.net/npm/resource-tracker@0.0.1-alpha1/resource.mjs",
     "proj-wasm": "https://cdn.jsdelivr.net/npm/proj-wasm@0.1.0-alpha7/dist/proj.mjs",
-    "maplibre-gl": "https://esm.sh/maplibre-gl@5.19.0?bundle-deps",
-    "backproj": "https://cdn.jsdelivr.net/npm/backproj@0.0.1/dist/backproj.mjs",
-    "maplibre-proj": "https://cdn.jsdelivr.net/npm/maplibre-proj@0.0.1/dist/maplibre-proj.mjs"
+    "maplibre-gl": "https://esm.sh/maplibre-gl@5.20.0?bundle-deps",
+    "backproj": "https://cdn.jsdelivr.net/npm/backproj@0.0.2/dist/backproj.mjs",
+    "maplibre-proj": "https://cdn.jsdelivr.net/npm/maplibre-proj@0.0.2/dist/maplibre-proj.mjs",
+    "lru-cache": "https://cdn.jsdelivr.net/npm/lru-cache@11.2.6/dist/esm/index.js",
+    "pbf": "https://esm.sh/pbf@4.0.1",
+    "@mapbox/vector-tile": "https://esm.sh/@mapbox/vector-tile@2.0.3",
+    "vt-pbf": "https://esm.sh/vt-pbf@3.1.3",
+    "@wcohen/wasmts": "https://cdn.jsdelivr.net/npm/@wcohen/wasmts@0.1.0-alpha4/dist/wasmts.js"
   }
 }
 </script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
 #map { position: absolute; inset: 0; }
 
@@ -39,6 +42,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   top: 10px;
   left: 10px;
   width: 340px;
+  max-width: calc(100vw - 20px);
   background: rgba(255, 255, 255, 0.95);
   border-radius: 8px;
   padding: 16px;
@@ -68,6 +72,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 }
 #sidebar-toggle:hover { color: #0d47a1; }
 #sidebar.collapsed { padding: 10px 16px; width: auto; min-width: 0; }
+#sidebar-body { margin-top: 12px; }
 #sidebar.collapsed #sidebar-body { display: none; }
 #sidebar.collapsed #sidebar-header h1 { display: none; }
 #sidebar-collapsed-info {
@@ -117,7 +122,7 @@ button {
 }
 button:hover { background: #e8e8e8; }
 
-.btn-row { display: flex; gap: 4px; margin-top: 6px; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .btn-row.mode-toggle { margin-bottom: 8px; }
 .btn-row.mode-toggle button { flex: 1; }
 .btn-row.mode-toggle button.active {
@@ -256,6 +261,91 @@ summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #555; }
 .about-content { margin-top: 8px; font-size: 12px; line-height: 1.5; color: #666; }
 .about-content p { margin-bottom: 6px; }
 .about-content a { color: #1565c0; }
+
+/* Nominatim search */
+#search-container {
+  position: relative;
+  margin-bottom: 12px;
+}
+#search-container input {
+  width: 100%;
+  padding: 8px 32px 8px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+  background: #fff;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+#search-container input:focus { outline: 2px solid #1565c0; }
+#search-clear {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  background: none;
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  color: #999;
+  padding: 0 4px;
+  line-height: 1;
+  display: none;
+}
+#search-clear:hover { color: #333; }
+#search-results {
+  display: none;
+  margin-top: 4px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.search-result-item {
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 1px solid #f0f0f0;
+  line-height: 1.35;
+}
+.search-result-item:last-child { border-bottom: none; }
+.search-result-item:hover, .search-result-item.active { background: #e3f2fd; }
+.search-result-item .search-result-type {
+  font-size: 10px;
+  color: #888;
+  text-transform: uppercase;
+  margin-left: 6px;
+}
+#search-spinner {
+  display: none;
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #ccc;
+  border-top-color: #1565c0;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#search-error {
+  display: none;
+  margin-top: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #c62828;
+  background: #ffebee;
+  border-radius: 4px;
+}
+
+/* Mobile layout */
+@media (max-width: 600px) {
+  #sidebar {
+    width: calc(100% - 20px);
+  }
+  input[type="text"], textarea, select { font-size: 16px !important; }
+}
 </style>
 </head>
 <body>
@@ -268,6 +358,14 @@ summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #555; }
     <button id="sidebar-toggle" title="Collapse panel">Hide</button>
   </div>
   <div id="sidebar-body">
+
+  <div id="search-container">
+    <input type="text" id="search-input" placeholder="Search places (Nominatim)..." autocomplete="off">
+    <button id="search-clear" title="Clear search">x</button>
+    <div id="search-spinner"></div>
+    <div id="search-results"></div>
+    <div id="search-error"></div>
+  </div>
 
   <!-- CRS Selector -->
   <label>Projection</label>
@@ -288,6 +386,8 @@ summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #555; }
     <div class="crs-chip" id="crs-chip">
       <span class="crs-chip-code" id="crs-chip-code"></span>
       <span class="crs-chip-name" id="crs-chip-name"></span>
+      <button id="zoom-area-of-use" style="margin-left:8px; font-size:11px; padding:2px 6px; cursor:pointer" title="Zoom to CRS area of use">Zoom to area</button>
+      <button id="reset-defaults" style="font-size:11px; padding:2px 6px; cursor:pointer" title="Reset to EPSG:5070 Conus Albers">Default</button>
     </div>
   </div>
 
@@ -304,19 +404,59 @@ summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #555; }
   <div id="loading">Loading projection...</div>
   <div id="error"></div>
 
-  <!-- Layers -->
+  <!-- Data Sources -->
   <div class="section">
-    <label>GeoJSON Layers</label>
-    <div class="layer-list" id="layer-list"></div>
-    <div class="input-row" style="margin-top:6px">
-      <input type="text" id="layer-url" placeholder="GeoJSON URL">
-      <button id="layer-add-url">Add</button>
+    <label>Data</label>
+    <div class="btn-row mode-toggle" style="margin-top:4px">
+      <button id="data-mvt" class="active">MVT</button>
+      <button id="data-geojson">GeoJSON</button>
+      <button id="data-both">Both</button>
     </div>
-    <div class="btn-row" style="margin-top:4px">
-      <button id="layer-upload-btn">Upload File</button>
-      <input type="file" id="layer-file" accept=".geojson,.json" style="display:none">
-      <button id="reset-defaults" style="margin-left:auto">Reset</button>
+
+    <!-- MVT sub-panel -->
+    <div id="mvt-panel" style="margin-top:8px">
+      <div class="input-row">
+        <input type="text" id="vt-url" value="https://tiles.openstreetmap.us/vector/openmaptiles/{z}/{x}/{y}.mvt" style="font-size:11px; font-family:monospace;">
+      </div>
+      <div style="margin-top:4px; font-size:11px; color:#666">Base style URL:</div>
+      <div class="input-row" style="margin-top:2px">
+        <input type="text" id="vt-style-url" value="https://openmaptiles.github.io/maptiler-basic-gl-style/style-cdn.json" style="font-size:11px; font-family:monospace;">
+      </div>
+      <div id="vt-status" style="display:none; margin-top:6px; font-size:11px; color:#666"></div>
+      <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+        <input type="checkbox" id="debug-labels-toggle">
+        <span style="font-size:12px">Show tile debug labels</span>
+      </div>
     </div>
+
+    <!-- GeoJSON sub-panel -->
+    <div id="geojson-panel" style="display:none; margin-top:8px">
+      <div class="layer-list" id="layer-list"></div>
+      <div class="input-row" style="margin-top:6px">
+        <input type="text" id="layer-url" placeholder="GeoJSON URL">
+        <button id="layer-add-url">Add</button>
+      </div>
+      <div class="btn-row" style="margin-top:4px">
+        <button id="layer-upload-btn">Upload File</button>
+        <input type="file" id="layer-file" accept=".geojson,.json" style="display:none">
+      </div>
+    </div>
+  </div>
+
+  <!-- Profiling (hidden until debug() called from console) -->
+  <div class="section" id="profiling-section" style="display:none">
+    <label>Profiling</label>
+    <div style="display:flex; align-items:center; gap:8px; margin-top:4px">
+      <input type="checkbox" id="profiling-toggle">
+      <span style="font-size:12px">Enable profiling</span>
+    </div>
+    <div class="btn-row" style="margin-top:6px">
+      <button id="profiling-print">Print Summary</button>
+      <button id="profiling-export">Export JSON</button>
+      <button id="profiling-clear">Clear</button>
+      <button id="profiling-benchmark">Benchmark</button> <span style="font-size:10px;color:#888">EPSG:2249</span>
+    </div>
+    <div id="benchmark-status" style="display:none; margin-top:6px; font-size:11px; color:#1565c0; padding:6px 8px; background:#e3f2fd; border-radius:4px"></div>
   </div>
 
   <details>
@@ -340,26 +480,42 @@ map.fitBounds(bounds);</code></pre>
 </div>
 
 <script type="module">
-import { Map as MapGL } from 'maplibre-gl';
+import { Map as MapGL, NavigationControl, importScriptInWorkers } from 'maplibre-gl';
 import { reprojectStyle } from 'maplibre-proj';
 import * as proj from 'proj-wasm';
-import { transformCoords, initProj } from 'backproj';
+import { transformCoords, initProj, enableProfiling, disableProfiling, printProfilingSummary, exportProfilingJSON, clearProfilingData } from 'backproj';
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-const state = {
+window.debug = () => {
+  enableProfiling();
+  document.getElementById('profiling-section').style.display = '';
+  document.getElementById('profiling-toggle').checked = true;
+  console.log('Profiling enabled (effective only in dev builds).');
+};
+window.printProfilingSummary = printProfilingSummary;
+window.exportProfilingJSON = exportProfilingJSON;
+
+const DEFAULT_CRS = 'EPSG:5070';
+const NOMINATIM_RATE_LIMIT_MS = 1250;
+const MAX_CRS_SEARCH_RESULTS = 50;
+
+const state = window._state = {
   map: null,
   transformer: null,
-  currentCRS: 'EPSG:5070',
+  currentCRS: DEFAULT_CRS,
   layers: [],
   projectedCRS: [],
   nextLayerId: 0,
+  dataMode: 'mvt', // 'mvt' | 'geojson' | 'both'
+  vectorTilesEnabled: true,
+  geojsonEnabled: false,
+  lastBounds: null,
+  cleanup: null,
+  baseStyle: null,
+  baseStyleUrl: null,
+  debugLabelsEnabled: true,
+  nominatimFeature: null,
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 function escapeHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -395,19 +551,115 @@ function detectGeomType(fc) {
   return 'polygon';
 }
 
-// ---------------------------------------------------------------------------
-// Map integration
-// ---------------------------------------------------------------------------
-async function updateMap(crsString) {
+function parseHash() {
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  return {
+    crs: params.get('crs') || null,
+    z: params.has('z') ? Number(params.get('z')) : null,
+    x: params.has('x') ? Number(params.get('x')) : null,
+    y: params.has('y') ? Number(params.get('y')) : null,
+    data: params.get('data') || null,
+    grid: params.get('grid') === '1',
+  };
+}
+
+function updateHash() {
+  const params = new URLSearchParams();
+  params.set('crs', state.currentCRS);
+  if (state.map) {
+    const c = state.map.getCenter();
+    params.set('z', state.map.getZoom().toFixed(2));
+    params.set('x', c.lng.toFixed(4));
+    params.set('y', c.lat.toFixed(4));
+  }
+  params.set('data', state.dataMode);
+  if (state.debugLabelsEnabled) params.set('grid', '1');
+  window.location.hash = params.toString();
+}
+
+async function setDataMode(mode) {
+  state.dataMode = mode;
+  state.vectorTilesEnabled = mode === 'mvt' || mode === 'both';
+  state.geojsonEnabled = mode === 'geojson' || mode === 'both';
+
+  if (state.geojsonEnabled) await loadDefaultLayers();
+  for (const l of state.layers) l.visible = state.geojsonEnabled;
+  renderLayerList();
+
+  document.getElementById('mvt-panel').style.display = state.vectorTilesEnabled ? '' : 'none';
+  document.getElementById('geojson-panel').style.display = state.geojsonEnabled ? '' : 'none';
+
+  for (const id of ['data-mvt', 'data-geojson', 'data-both']) {
+    document.getElementById(id).classList.remove('active');
+  }
+  document.getElementById('data-' + mode).classList.add('active');
+}
+
+async function fetchBaseStyle() {
+  const url = document.getElementById('vt-style-url').value.trim();
+  if (state.baseStyle && state.baseStyleUrl === url) return state.baseStyle;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Failed to fetch base style: ${resp.status}`);
+  const style = await resp.json();
+  state.baseStyle = style;
+  state.baseStyleUrl = url;
+  return style;
+}
+
+async function updateMap(crsString, initialPos) {
   clearError();
   showLoading('Reprojecting...');
 
   try {
+    const previousCleanup = state.cleanup;
+    state.cleanup = null;
+
     const sources = {};
-    const layers = [
-      { id: 'background', type: 'background', paint: { 'background-color': '#aad3df' } },
-    ];
+    const layers = [];
+    let glyphs = undefined;
+    let sprite = undefined;
+
+    if (state.vectorTilesEnabled) {
+      try {
+        const baseStyle = await fetchBaseStyle();
+        const vtUrl = document.getElementById('vt-url').value.trim();
+
+        sources['openmaptiles'] = {
+          type: 'vector',
+          tiles: [vtUrl],
+          maxzoom: 14,
+        };
+
+        glyphs = 'https://tiles.openstreetmap.us/fonts/{fontstack}/{range}.pbf';
+        if (baseStyle.sprite) sprite = baseStyle.sprite;
+
+        // Reprojected zoom levels don't correspond to the source zoom levels,
+        // so min/maxzoom constraints would hide layers at the wrong times.
+        for (const layer of baseStyle.layers) {
+          const l = { ...layer };
+          delete l.minzoom;
+          delete l.maxzoom;
+          layers.push(l);
+        }
+      } catch (err) {
+        console.error('Base style fetch failed:', err);
+        const vtStatus = document.getElementById('vt-status');
+        vtStatus.textContent = `Style fetch failed: ${err.message}`;
+        vtStatus.style.display = '';
+        layers.push(
+          { id: 'background', type: 'background', paint: { 'background-color': '#aad3df' } },
+        );
+      }
+    }
+
+    if (!layers.length || !layers.some(l => l.type === 'background')) {
+      layers.unshift(
+        { id: 'background', type: 'background', paint: { 'background-color': '#aad3df' } },
+      );
+    }
+
     for (const layer of state.layers) {
+      if (!layer.visible) continue;
       sources[layer.id] = { type: 'geojson', data: layer.data };
       const geomType = detectGeomType(layer.data);
       const { fill, stroke, opacity } = layer.style;
@@ -434,32 +686,59 @@ async function updateMap(crsString) {
         });
       }
     }
-    const inputStyle = { version: 8, sources, layers };
+    const inputStyle = { version: 8, sources, layers, ...(glyphs && { glyphs }), ...(sprite && { sprite }) };
 
-    const { style, bounds, transformer } = await reprojectStyle({
-      style: inputStyle,
-      crs: crsString,
-    });
+    const reprojectOpts = { style: inputStyle, crs: crsString, tileBoundaries: state.debugLabelsEnabled };
+    if (state.transformer && state.currentCRS === crsString) {
+      reprojectOpts.transformer = state.transformer;
+    }
+    const { style, bounds, maxBounds, transformer, cleanup } = await reprojectStyle(reprojectOpts);
 
+    const crsChanged = crsString !== state.currentCRS;
     state.transformer = transformer;
     state.currentCRS = crsString;
+    state.lastBounds = bounds;
+    state.cleanup = cleanup;
+
+    if (previousCleanup && previousCleanup !== cleanup) {
+      previousCleanup();
+    }
 
     if (state.map) {
+      state.map.setMaxBounds(null);
       state.map.setStyle(style);
-      state.map.once('styledata', () => {
-        state.map.fitBounds(bounds, { animate: false });
+      state.map.once('styledata', async () => {
+        if (crsChanged) {
+          if (state.nominatimFeature) {
+            await applyNominatimHighlight(state.nominatimFeature);
+          } else {
+            state.map.fitBounds(bounds, { animate: false, padding: 20 });
+          }
+        }
+        if (maxBounds) state.map.setMaxBounds(maxBounds);
       });
     } else {
-      state.map = new MapGL({
+      const mapOpts = {
         container: 'map',
         style,
         projection: { type: 'mercator' },
         renderWorldCopies: false,
-      });
-      state.map.on('load', () => state.map.fitBounds(bounds, { animate: false }));
+      };
+      if (maxBounds) mapOpts.maxBounds = maxBounds;
+      if (initialPos) {
+        mapOpts.center = initialPos.center;
+        mapOpts.zoom = initialPos.zoom;
+      }
+      state.map = new MapGL(mapOpts);
+      state.map.addControl(new NavigationControl({ visualizePitch: true }), 'top-right');
+      if (!initialPos) {
+        state.map.on('load', () => {
+          state.map.fitBounds(bounds, { animate: false, padding: 20 });
+        });
+      }
     }
 
-    window.location.hash = `crs=${encodeURIComponent(crsString)}`;
+    updateHash();
     hideLoading();
   } catch (err) {
     hideLoading();
@@ -468,9 +747,6 @@ async function updateMap(crsString) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Layer management
-// ---------------------------------------------------------------------------
 const DEFAULT_FILLS = ['#f2efe9', '#d4e6f1', '#d5f5e3', '#fdebd0', '#e8daef', '#fadbd8'];
 const DEFAULT_STROKES = ['#9e9cab', '#2980b9', '#27ae60', '#e67e22', '#8e44ad', '#c0392b'];
 
@@ -478,7 +754,7 @@ function addLayer(name, data, url) {
   const id = 'layer-' + (state.nextLayerId++);
   const ci = state.layers.length % DEFAULT_FILLS.length;
   state.layers.push({
-    id, name, data, url: url || '',
+    id, name, data, url: url || '', visible: true,
     style: { fill: DEFAULT_FILLS[ci], stroke: DEFAULT_STROKES[ci], opacity: 1 },
   });
   renderLayerList();
@@ -497,7 +773,7 @@ async function zoomToLayer(id) {
 
   const allCoords = [];
   for (const f of layer.data.features) {
-    if (f.geometry) collectBBox(f.geometry, allCoords);
+    if (f.geometry) collectCoords(f.geometry, allCoords);
   }
   if (allCoords.length === 0) return;
 
@@ -520,7 +796,7 @@ async function zoomToLayer(id) {
   }
 }
 
-function collectBBox(geom, out) {
+function collectCoords(geom, out) {
   switch (geom.type) {
     case 'Point': out.push([geom.coordinates[0], geom.coordinates[1]]); break;
     case 'MultiPoint': case 'LineString':
@@ -530,7 +806,7 @@ function collectBBox(geom, out) {
     case 'MultiPolygon':
       for (const poly of geom.coordinates) for (const ring of poly) for (const p of ring) out.push([p[0], p[1]]); break;
     case 'GeometryCollection':
-      for (const child of geom.geometries) collectBBox(child, out); break;
+      for (const child of geom.geometries) collectCoords(child, out); break;
   }
 }
 
@@ -589,6 +865,15 @@ function renderLayerList() {
 
     const header = document.createElement('div');
     header.className = 'layer-header';
+    const visCheck = document.createElement('input');
+    visCheck.type = 'checkbox';
+    visCheck.checked = layer.visible;
+    visCheck.style.cssText = 'margin: 0 4px 0 0; cursor: pointer;';
+    visCheck.addEventListener('change', () => {
+      layer.visible = visCheck.checked;
+      updateMap(state.currentCRS);
+    });
+    header.appendChild(visCheck);
     const dragHandle = document.createElement('span');
     dragHandle.textContent = '\u2261';
     dragHandle.style.cssText = 'cursor: grab; font-size: 16px; color: #999; margin-right: 2px;';
@@ -622,7 +907,13 @@ function renderLayerList() {
     fillPicker.value = layer.style.fill;
     fillPicker.addEventListener('input', () => {
       layer.style.fill = fillPicker.value;
-      updateMap(state.currentCRS);
+      if (state.map) {
+        try {
+          state.map.setPaintProperty(layer.id + '-fill', 'fill-color', fillPicker.value);
+          state.map.setPaintProperty(layer.id + '-fill', 'fill-outline-color', layer.style.stroke);
+          state.map.setPaintProperty(layer.id + '-circle', 'circle-color', fillPicker.value);
+        } catch {}
+      }
     });
     styleRow.appendChild(fillPicker);
 
@@ -634,7 +925,12 @@ function renderLayerList() {
     strokePicker.value = layer.style.stroke;
     strokePicker.addEventListener('input', () => {
       layer.style.stroke = strokePicker.value;
-      updateMap(state.currentCRS);
+      if (state.map) {
+        try {
+          state.map.setPaintProperty(layer.id + '-line', 'line-color', strokePicker.value);
+          state.map.setPaintProperty(layer.id + '-fill', 'fill-outline-color', strokePicker.value);
+        } catch {}
+      }
     });
     styleRow.appendChild(strokePicker);
 
@@ -649,7 +945,13 @@ function renderLayerList() {
     opSlider.value = layer.style.opacity;
     opSlider.addEventListener('input', () => {
       layer.style.opacity = parseFloat(opSlider.value);
-      updateMap(state.currentCRS);
+      if (state.map) {
+        try {
+          state.map.setPaintProperty(layer.id + '-fill', 'fill-opacity', layer.style.opacity);
+          state.map.setPaintProperty(layer.id + '-line', 'line-opacity', layer.style.opacity);
+          state.map.setPaintProperty(layer.id + '-circle', 'circle-opacity', layer.style.opacity);
+        } catch {}
+      }
     });
     styleRow.appendChild(opSlider);
 
@@ -675,7 +977,6 @@ function renderLayerList() {
   }
 }
 
-// Add URL
 document.getElementById('layer-add-url').addEventListener('click', async () => {
   const urlInput = document.getElementById('layer-url');
   const url = urlInput.value.trim();
@@ -697,7 +998,6 @@ document.getElementById('layer-add-url').addEventListener('click', async () => {
   }
 });
 
-// Upload file
 document.getElementById('layer-upload-btn').addEventListener('click', () => {
   document.getElementById('layer-file').click();
 });
@@ -719,9 +1019,6 @@ document.getElementById('layer-file').addEventListener('change', (e) => {
   e.target.value = '';
 });
 
-// ---------------------------------------------------------------------------
-// CRS selector - mode toggle
-// ---------------------------------------------------------------------------
 const browseMode = document.getElementById('browse-mode');
 const manualMode = document.getElementById('manual-mode');
 const modeBrowseBtn = document.getElementById('mode-browse');
@@ -741,9 +1038,6 @@ modeManualBtn.addEventListener('click', () => {
   modeBrowseBtn.classList.remove('active');
 });
 
-// ---------------------------------------------------------------------------
-// CRS selector - manual input
-// ---------------------------------------------------------------------------
 const crsInput = document.getElementById('crs-input');
 const crsApply = document.getElementById('crs-apply');
 
@@ -768,7 +1062,6 @@ crsInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); applyManualCRS(); }
 });
 
-// .prj file upload
 document.getElementById('crs-upload-btn').addEventListener('click', () => {
   document.getElementById('crs-file').click();
 });
@@ -784,9 +1077,6 @@ document.getElementById('crs-file').addEventListener('change', (e) => {
   e.target.value = '';
 });
 
-// ---------------------------------------------------------------------------
-// CRS selector - browse database
-// ---------------------------------------------------------------------------
 const crsSearchInput = document.getElementById('crs-search');
 const crsBrowseBtn = document.getElementById('crs-browse');
 const crsDropdown = document.getElementById('crs-dropdown');
@@ -807,7 +1097,7 @@ function filterCatalog(query) {
     const name = (e.name || '').toLowerCase();
     if (q && !id.includes(q) && !name.includes(q)) continue;
     results.push(e);
-    if (results.length >= 50) break;
+    if (results.length >= MAX_CRS_SEARCH_RESULTS) break;
   }
   return results;
 }
@@ -897,9 +1187,6 @@ crsBrowseBtn.addEventListener('mousedown', (e) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
 const NE_GRATICULES_URL =
   'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_graticules_10.geojson';
 const NE_LAND_URL =
@@ -912,16 +1199,44 @@ const NE_PROVINCES_URL =
 async function init() {
   showLoading('Initializing proj-wasm...');
 
+  // Initialize MapLibre's global dispatcher so custom protocol handlers
+  // on the main thread are reachable from the worker's getResource fallback
+  importScriptInWorkers('data:text/javascript,');
+
   await initProj();
 
   // Load CRS catalog
-  const catalog = await proj.getCrsInfoListFromDatabase({ auth_name: '', types: [15] });
+  const catalog = await proj.getCrsInfoListFromDatabase({ auth_name: '', types: [15] }); // 15 = PJ_TYPE_PROJECTED_CRS
   state.projectedCRS = catalog.filter(e => !e.deprecated);
 
-  await loadDefaultLayers();
+  const hash = parseHash();
+  const initialCRS = hash.crs || DEFAULT_CRS;
+  const dataMode = hash.data || 'mvt';
+
+  const initialEntry = state.projectedCRS.find(e => `${e.auth_name}:${e.code}` === initialCRS);
+  crsChipCode.textContent = initialCRS;
+  crsChipName.textContent = initialEntry ? (initialEntry.name || '') : '';
+  crsChip.style.display = 'block';
+
+  await setDataMode(dataMode);
+
+  state.debugLabelsEnabled = true;
+  document.getElementById('debug-labels-toggle').checked = true;
+
+  hideLoading();
+  const hashPos = (hash.z !== null && hash.x !== null && hash.y !== null)
+    ? { center: [hash.x, hash.y], zoom: hash.z }
+    : null;
+  await updateMap(initialCRS, hashPos);
+
+  // Update hash on map move
+  state.map.on('moveend', updateHash);
 }
 
+let defaultLayersLoaded = false;
 async function loadDefaultLayers() {
+  if (defaultLayersLoaded) return;
+  defaultLayersLoaded = true;
   showLoading('Loading Natural Earth data...');
   state.layers = [];
   state.nextLayerId = 0;
@@ -946,23 +1261,419 @@ async function loadDefaultLayers() {
   } catch (err) {
     showError(`Failed to load default layers: ${err.message}`);
   }
-
-  const DEFAULT_CRS = 'EPSG:5070';
-  const hashMatch = window.location.hash.match(/crs=([^&]+)/);
-  const initialCRS = hashMatch ? decodeURIComponent(hashMatch[1]) : DEFAULT_CRS;
-
-  const initialEntry = state.projectedCRS.find(e => `${e.auth_name}:${e.code}` === initialCRS);
-  crsChipCode.textContent = initialCRS;
-  crsChipName.textContent = initialEntry ? (initialEntry.name || '') : '';
-  crsChip.style.display = 'block';
-
-  hideLoading();
-  await updateMap(initialCRS);
 }
 
+for (const mode of ['mvt', 'geojson', 'both']) {
+  document.getElementById('data-' + mode).addEventListener('click', async () => {
+    await setDataMode(mode);
+    updateHash();
+    await updateMap(state.currentCRS);
+  });
+}
+
+document.getElementById('vt-style-url').addEventListener('change', async () => {
+  state.baseStyle = null;
+  state.baseStyleUrl = null;
+  if (state.vectorTilesEnabled) await updateMap(state.currentCRS);
+});
+
+document.getElementById('profiling-toggle').addEventListener('change', (e) => {
+  if (e.target.checked) {
+    enableProfiling();
+  } else {
+    disableProfiling();
+  }
+});
+
+document.getElementById('debug-labels-toggle').addEventListener('change', async (e) => {
+  state.debugLabelsEnabled = e.target.checked;
+  updateHash();
+  if (state.vectorTilesEnabled) await updateMap(state.currentCRS);
+});
+
+document.getElementById('profiling-print').addEventListener('click', () => {
+  printProfilingSummary();
+});
+
+document.getElementById('profiling-export').addEventListener('click', () => {
+  const json = exportProfilingJSON();
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `backproj-profile-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+document.getElementById('profiling-clear').addEventListener('click', () => {
+  clearProfilingData();
+  console.log('Profiling data cleared');
+});
+
+// Waypoints are WGS84 coords, must be transformed via transformCoords().
+let benchmarkRunning = false;
+
+async function runBenchmark() {
+  if (benchmarkRunning) return;
+  benchmarkRunning = true;
+  const map = state.map;
+  const statusEl = document.getElementById('benchmark-status');
+  const btnEl = document.getElementById('profiling-benchmark');
+  btnEl.disabled = true;
+
+  function setStatus(msg) {
+    statusEl.textContent = msg;
+    statusEl.style.display = '';
+    console.log(`[benchmark] ${msg}`);
+  }
+
+  function waitForIdle() {
+    return new Promise(r => map.once('idle', r));
+  }
+
+  try {
+    if (state.currentCRS !== 'EPSG:2249') {
+      setStatus('Switching to EPSG:2249...');
+      await updateMap('EPSG:2249');
+      await waitForIdle();
+    }
+
+    setStatus('Resetting viewport...');
+    clearProfilingData();
+    enableProfiling();
+    document.getElementById('profiling-toggle').checked = true;
+
+    map.fitBounds(state.lastBounds, { animate: false });
+    await waitForIdle();
+
+    // WGS84 -> fake Mercator via the full projection pipeline.
+    setStatus('Computing waypoints...');
+    const fakeCoords = await transformCoords([
+      [-71.058, 42.360],  // Downtown Boston
+      [-71.094, 42.360],  // Cambridge/MIT
+      [-71.040, 42.345],  // South Boston waterfront
+      [-71.081, 42.349],  // Back Bay
+      [-71.097, 42.347],  // Fenway
+    ], state.transformer);
+    const [boston, cambridge, southBoston, backBay, fenway] = fakeCoords;
+
+    setStatus('Flight starting...');
+
+    // [lng, lat, zoom, durationMs, label]
+    const plan = [
+      [boston[0], boston[1], 10, 0, 'Jump to Boston z10'],
+      [boston[0], boston[1], 12, 2000, 'Zoom to z12'],
+      [cambridge[0], cambridge[1], 12, 3000, 'Pan to Cambridge'],
+      [southBoston[0], southBoston[1], 13, 3000, 'South Boston + zoom z13'],
+      [backBay[0], backBay[1], 13, 3000, 'Pan to Back Bay'],
+      [fenway[0], fenway[1], 12, 3000, 'Fenway + zoom z12'],
+      [boston[0], boston[1], 12, 2000, 'Return to Boston'],
+    ];
+
+    const flightStart = performance.now();
+
+    for (let i = 0; i < plan.length; i++) {
+      const [lng, lat, zoom, dur, label] = plan[i];
+      setStatus(`Waypoint ${i + 1}/${plan.length}: ${label}`);
+
+      if (dur === 0) {
+        map.jumpTo({ center: [lng, lat], zoom });
+      } else {
+        map.flyTo({ center: [lng, lat], zoom, duration: dur });
+      }
+      await waitForIdle();
+    }
+
+    const flightMs = performance.now() - flightStart;
+    setStatus(`Flight complete in ${Math.round(flightMs)}ms. See console for profiling.`);
+    printProfilingSummary();
+
+  } catch (err) {
+    setStatus(`Benchmark error: ${err.message}`);
+    console.error('[benchmark]', err);
+  } finally {
+    benchmarkRunning = false;
+    btnEl.disabled = false;
+  }
+}
+
+document.getElementById('profiling-benchmark').addEventListener('click', () => {
+  runBenchmark();
+});
+
+document.getElementById('zoom-area-of-use').addEventListener('click', () => {
+  if (state.lastBounds && state.map) {
+    state.map.fitBounds(state.lastBounds, { animate: true });
+  }
+});
+
 document.getElementById('reset-defaults').addEventListener('click', async () => {
-  window.location.hash = '';
-  await loadDefaultLayers();
+  setDataMode('mvt');
+  state.debugLabelsEnabled = true;
+  document.getElementById('debug-labels-toggle').checked = true;
+  state.transformer = null;
+  state.currentCRS = null;
+  state.baseStyle = null;
+  state.baseStyleUrl = null;
+  const entry = state.projectedCRS.find(e => `${e.auth_name}:${e.code}` === DEFAULT_CRS);
+  crsChipCode.textContent = DEFAULT_CRS;
+  crsChipName.textContent = entry ? (entry.name || '') : '';
+  await updateMap(DEFAULT_CRS);
+});
+
+const NOMINATIM_HIGHLIGHT_ID = '_nominatim-highlight';
+let nominatimDebounce = null;
+let lastNominatimFetch = 0;
+let searchResults = [];
+let searchActiveIdx = -1;
+
+async function nominatimSearch(query) {
+  if (!query.trim()) return;
+  const now = Date.now();
+  const wait = Math.max(0, NOMINATIM_RATE_LIMIT_MS - (now - lastNominatimFetch));
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  lastNominatimFetch = Date.now();
+
+  const params = new URLSearchParams({
+    q: query, format: 'geojson', polygon_geojson: '1', limit: '5',
+  });
+  const resp = await fetch(
+    `https://nominatim.openstreetmap.org/search?${params}`
+  );
+  if (!resp.ok) throw new Error(`Nominatim ${resp.status}`);
+  return resp.json();
+}
+
+function renderSearchResults(fc) {
+  const container = document.getElementById('search-results');
+  container.innerHTML = '';
+  searchResults = fc.features || [];
+  searchActiveIdx = -1;
+  if (searchResults.length === 0) {
+    container.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#888">No results found</div>';
+    container.style.display = 'block';
+    return;
+  }
+  for (let i = 0; i < searchResults.length; i++) {
+    const f = searchResults[i];
+    const item = document.createElement('div');
+    item.className = 'search-result-item';
+    const name = f.properties.display_name || '';
+    const type = f.properties.type || f.properties.category || '';
+    item.innerHTML = `${escapeHtml(name)}<span class="search-result-type">${escapeHtml(type)}</span>`;
+    item.addEventListener('click', () => { selectSearchResult(i); });
+    container.appendChild(item);
+  }
+  container.style.display = 'block';
+}
+
+async function selectSearchResult(idx) {
+  if (idx < 0 || idx >= searchResults.length) return;
+  const feature = searchResults[idx];
+  const input = document.getElementById('search-input');
+  input.value = feature.properties.display_name || '';
+  document.getElementById('search-results').style.display = 'none';
+  document.getElementById('search-clear').style.display = 'block';
+
+  state.nominatimFeature = feature;
+  await applyNominatimHighlight(feature);
+}
+
+async function applyNominatimHighlight(feature) {
+  clearNominatimHighlight();
+  if (!state.map || !state.transformer) return;
+
+  const bbox = feature.bbox;
+  let outOfBounds = false;
+
+  if (bbox) {
+    try {
+      const corners = await transformCoords(
+        [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
+        state.transformer
+      );
+      if (isFinite(corners[0][0]) && isFinite(corners[1][0])) {
+        state.map.fitBounds(
+          [[corners[0][0], corners[0][1]], [corners[1][0], corners[1][1]]],
+          { animate: true, padding: 50, maxZoom: 18 }
+        );
+      } else {
+        outOfBounds = true;
+      }
+    } catch (err) {
+      outOfBounds = true;
+      console.error('Zoom to search result failed:', err);
+    }
+  }
+
+  if (outOfBounds) {
+    const errEl = document.getElementById('search-error');
+    errEl.textContent = `Outside area of use for ${state.currentCRS}`;
+    errEl.style.display = '';
+    return;
+  }
+
+  if (feature.geometry) {
+    try {
+      const transformed = await transformFeatureGeometry(feature.geometry, state.transformer);
+      state.map.addSource(NOMINATIM_HIGHLIGHT_ID, {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: transformed, properties: {} }] },
+      });
+      const gt = transformed.type;
+      if (gt.includes('Polygon')) {
+        state.map.addLayer({ id: NOMINATIM_HIGHLIGHT_ID + '-fill', source: NOMINATIM_HIGHLIGHT_ID, type: 'fill', paint: { 'fill-color': '#ff6600', 'fill-opacity': 0.15 } });
+        state.map.addLayer({ id: NOMINATIM_HIGHLIGHT_ID + '-line', source: NOMINATIM_HIGHLIGHT_ID, type: 'line', paint: { 'line-color': '#ff6600', 'line-width': 2.5 } });
+      } else if (gt.includes('Line')) {
+        state.map.addLayer({ id: NOMINATIM_HIGHLIGHT_ID + '-line', source: NOMINATIM_HIGHLIGHT_ID, type: 'line', paint: { 'line-color': '#ff6600', 'line-width': 3 } });
+      } else {
+        state.map.addLayer({ id: NOMINATIM_HIGHLIGHT_ID + '-circle', source: NOMINATIM_HIGHLIGHT_ID, type: 'circle', paint: { 'circle-color': '#ff6600', 'circle-radius': 8, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' } });
+      }
+    } catch (err) {
+      console.error('Highlight geometry failed:', err);
+    }
+  }
+}
+
+function clearNominatimHighlight() {
+  const errEl = document.getElementById('search-error');
+  if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+  if (!state.map) return;
+  for (const suffix of ['-fill', '-line', '-circle']) {
+    if (state.map.getLayer(NOMINATIM_HIGHLIGHT_ID + suffix)) {
+      state.map.removeLayer(NOMINATIM_HIGHLIGHT_ID + suffix);
+    }
+  }
+  if (state.map.getSource(NOMINATIM_HIGHLIGHT_ID)) {
+    state.map.removeSource(NOMINATIM_HIGHLIGHT_ID);
+  }
+}
+
+async function transformFeatureGeometry(geom, transformer) {
+  const coords = [];
+  collectCoords(geom, coords);
+  if (coords.length === 0) return geom;
+  const transformed = await transformCoords(coords, transformer);
+  const ref = { idx: 0 };
+  return replaceGeomCoords(geom, transformed, ref);
+}
+
+function replaceGeomCoords(geom, tc, ref) {
+  switch (geom.type) {
+    case 'Point':
+      return { type: 'Point', coordinates: [tc[ref.idx][0], tc[ref.idx++][1]] };
+    case 'MultiPoint':
+    case 'LineString':
+      return { type: geom.type, coordinates: geom.coordinates.map(() => { const c = tc[ref.idx++]; return [c[0], c[1]]; }) };
+    case 'MultiLineString':
+    case 'Polygon':
+      return { type: geom.type, coordinates: geom.coordinates.map(ring => ring.map(() => { const c = tc[ref.idx++]; return [c[0], c[1]]; })) };
+    case 'MultiPolygon':
+      return { type: geom.type, coordinates: geom.coordinates.map(poly => poly.map(ring => ring.map(() => { const c = tc[ref.idx++]; return [c[0], c[1]]; }))) };
+    case 'GeometryCollection':
+      return { type: 'GeometryCollection', geometries: geom.geometries.map(g => replaceGeomCoords(g, tc, ref)) };
+    default: return geom;
+  }
+}
+
+const searchInput = document.getElementById('search-input');
+const searchResultsEl = document.getElementById('search-results');
+const searchClearBtn = document.getElementById('search-clear');
+const searchSpinner = document.getElementById('search-spinner');
+
+searchInput.addEventListener('input', () => {
+  clearTimeout(nominatimDebounce);
+  const q = searchInput.value.trim();
+  if (!q) {
+    searchResultsEl.style.display = 'none';
+    searchClearBtn.style.display = 'none';
+    return;
+  }
+  searchClearBtn.style.display = '';
+  searchResultsEl.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#888">Searching...</div>';
+  searchResultsEl.style.display = 'block';
+  nominatimDebounce = setTimeout(async () => {
+    try {
+      searchSpinner.style.display = '';
+      const fc = await nominatimSearch(q);
+      searchSpinner.style.display = 'none';
+      if (fc) renderSearchResults(fc);
+    } catch (err) {
+      searchSpinner.style.display = 'none';
+      console.error('Nominatim search failed:', err);
+    }
+  }, NOMINATIM_RATE_LIMIT_MS);
+});
+
+searchInput.addEventListener('keydown', (e) => {
+  if (searchResults.length === 0 || searchResultsEl.style.display === 'none') {
+    if (e.key === 'Enter') {
+      clearTimeout(nominatimDebounce);
+      const q = searchInput.value.trim();
+      if (q) {
+        searchSpinner.style.display = '';
+        nominatimSearch(q).then(fc => {
+          searchSpinner.style.display = 'none';
+          if (fc) renderSearchResults(fc);
+        }).catch(err => {
+          searchSpinner.style.display = 'none';
+          console.error('Nominatim search failed:', err);
+        });
+      }
+    }
+    return;
+  }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    searchActiveIdx = Math.min(searchActiveIdx + 1, searchResults.length - 1);
+    updateSearchHighlight();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    searchActiveIdx = Math.max(searchActiveIdx - 1, 0);
+    updateSearchHighlight();
+  } else if (e.key === 'Enter' && searchActiveIdx >= 0) {
+    e.preventDefault();
+    selectSearchResult(searchActiveIdx);
+  } else if (e.key === 'Escape') {
+    searchResultsEl.style.display = 'none';
+    searchActiveIdx = -1;
+  }
+});
+
+function updateSearchHighlight() {
+  const items = searchResultsEl.querySelectorAll('.search-result-item');
+  items.forEach((el, i) => el.classList.toggle('active', i === searchActiveIdx));
+  items[searchActiveIdx]?.scrollIntoView({ block: 'nearest' });
+}
+
+searchInput.addEventListener('blur', () => {
+  setTimeout(() => { searchResultsEl.style.display = 'none'; }, 300);
+});
+
+searchClearBtn.addEventListener('click', () => {
+  searchInput.value = '';
+  searchResultsEl.style.display = 'none';
+  searchClearBtn.style.display = 'none';
+  state.nominatimFeature = null;
+  clearNominatimHighlight();
+  clearError();
+});
+
+document.getElementById('sidebar-toggle').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const sidebar = document.getElementById('sidebar');
+  const toggle = document.getElementById('sidebar-toggle');
+  const collapsedCrs = document.querySelector('#sidebar-collapsed-info .collapsed-crs');
+  sidebar.classList.toggle('collapsed');
+  if (sidebar.classList.contains('collapsed')) {
+    toggle.textContent = 'Show';
+    toggle.title = 'Expand panel';
+    collapsedCrs.textContent = state.currentCRS;
+  } else {
+    toggle.textContent = 'Hide';
+    toggle.title = 'Collapse panel';
+  }
 });
 
 document.getElementById('sidebar-toggle').addEventListener('click', (e) => {

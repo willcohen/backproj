@@ -1,6 +1,19 @@
 # Change Log
-All notable changes to this project will be documented in this file. This change
-log follows the conventions of [keepachangelog.com](http://keepachangelog.com/).
+
+## 0.0.2 - 2026-03-11
+
+### Added
+- MVT reprojection via worker pool with input/output tile caching
+- Demo page shows both GeoJSON and MVT layers with data mode selector
+- Debug tile boundary overlay via `reprojectStyle` `tileBoundaries` option
+- `__DEV__` build split: prod builds eliminate all profiling code
+
+### Fixed
+- Protocol handler errors on CRS change (stale protocol removed before MapLibre finished with it)
+
+### Changed
+- wasmts dependency updated to 0.1.0-alpha4
+- Demo page loads wasmts from CDN via import map instead of local script tag
 
 ## 0.0.1 - 2026-03-08
 

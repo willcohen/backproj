@@ -1,19 +1,16 @@
+/**
+ * geojson.ts — GeoJSON FeatureCollection reprojection.
+ *
+ * Collects all coordinates from all features into a single flat array,
+ * transforms them in one batch call (2 proj-wasm WASM invocations), then
+ * rebuilds the geometry with reprojected coordinates. Returns a deep copy.
+ *
+ * Features are dropped if any reprojected coordinate is non-finite or if
+ * consecutive source coordinates cross the antimeridian (lon jump > 180).
+ */
 import type { FeatureCollection, Geometry } from 'geojson';
 import { transformCoords, Transformer } from './proj.js';
 
-/**
- * Reproject a GeoJSON FeatureCollection through a backproj Transformer.
- *
- * Collects all coordinates into a single flat array, transforms them in one
- * batch call (2 WASM invocations total), then rebuilds the geometry with the
- * reprojected coordinates. Returns a deep copy — the input is not mutated.
- *
- * Features are dropped if any reprojected coordinate is non-finite, or if
- * any consecutive pair of SOURCE coordinates crosses the antimeridian
- * (longitude jump > 180 degrees). The antimeridian check uses source
- * coordinates because reprojected fake lon/lat values have no meaningful
- * relationship to geographic longitude.
- */
 export async function reprojectGeoJSON(
   fc: FeatureCollection,
   transformer: Transformer,
@@ -37,7 +34,6 @@ export async function reprojectGeoJSON(
     idx = applyCoords(feature.geometry, reprojected, idx);
   }
 
-  const beforeCount = cloned.features.length;
   cloned.features = cloned.features.filter((_feature, i) => {
     const rings = featureRingRanges[i];
     for (const { start, end } of rings) {
@@ -54,8 +50,6 @@ export async function reprojectGeoJSON(
     }
     return true;
   });
-  console.log(`reprojectGeoJSON: ${beforeCount} features in, ${cloned.features.length} out`);
-
   return cloned;
 }
 

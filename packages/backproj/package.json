@@ -1,6 +1,6 @@
 {
   "name": "backproj",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Reproject coordinates through any CRS via proj-wasm",
   "type": "module",
   "main": "dist/backproj.mjs",
@@ -10,21 +10,33 @@
     ".": {
       "import": "./dist/backproj.mjs",
       "types": "./dist/index.d.ts"
-    }
+    },
+    "./tile-worker": "./dist/tile-worker.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --format=esm --external:proj-wasm --outfile=dist/backproj.mjs",
+    "build": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --external:proj-wasm --external:@mapbox/vector-tile --external:pbf --external:vt-pbf --external:@wcohen/wasmts --external:lru-cache --define:__DEV__=false --minify --sourcemap --outfile=dist/backproj.mjs && esbuild src/tile-worker.ts --bundle --format=iife --define:__DEV__=false --minify --sourcemap --outfile=dist/tile-worker.js && tsc --build",
+    "build:dev": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --external:proj-wasm --external:@mapbox/vector-tile --external:pbf --external:vt-pbf --external:@wcohen/wasmts --external:lru-cache --define:__DEV__=true --sourcemap --outfile=dist/backproj.mjs && esbuild src/tile-worker.ts --bundle --format=iife --define:__DEV__=true --sourcemap --outfile=dist/tile-worker.js && tsc --build",
     "check": "tsc --noEmit"
   },
+  "dependencies": {
+    "@mapbox/vector-tile": "^2.0.4",
+    "lru-cache": "^11.2.6",
+    "pbf": "^4.0.1",
+    "vt-pbf": "^3.1.3"
+  },
   "peerDependencies": {
+    "@wcohen/wasmts": ">=0.1.0-alpha4",
     "proj-wasm": ">=0.1.0-alpha7"
   },
   "devDependencies": {
-    "esbuild": "^0.24.0",
-    "typescript": "^5.7.0",
-    "@types/geojson": "^7946.0.14",
-    "proj-wasm": "^0.1.0-alpha7"
+    "@types/geojson": "^7946.0.16",
+    "@wcohen/wasmts": "^0.1.0-alpha4",
+    "esbuild": "^0.27.3",
+    "proj-wasm": "^0.1.0-alpha7",
+    "typescript": "^5.9.3"
   },
   "license": "MIT"
 }
