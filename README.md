@@ -21,7 +21,7 @@ Projection-agnostic coordinate transformation. No map renderer dependency.
 npm install backproj
 ```
 
-Peer dependency: `proj-wasm` (>=0.1.0-alpha7)
+Peer dependencies: `proj-wasm` (>=0.1.0-alpha7), `@wcohen/wasmts` (>=0.1.0-alpha4, for MVT reprojection)
 
 ```typescript
 import { initProj, buildTransformer, transformCoords, reprojectGeoJSON } from 'backproj';
@@ -46,6 +46,8 @@ const reprojected = await reprojectGeoJSON(featureCollection, transformer);
 | `transformPoint(coord, transformer)` | Single-point convenience wrapper. |
 | `getWorldBounds(transformer)` | Fake bounding box for `map.fitBounds()`. |
 | `reprojectGeoJSON(fc, transformer)` | Reproject a GeoJSON FeatureCollection. Returns a deep copy. |
+| `createTileProcessor(wasmtsUrl?)` | Create a worker pool for MVT reprojection. Requires `@wcohen/wasmts`. |
+| `createTileCache(opts?)` | LRU cache for fetched Mercator tile PBFs. |
 
 ### `maplibre-proj` — MapLibre GL JS integration
 
@@ -55,7 +57,7 @@ Thin wrapper that reprojects a MapLibre style for display in any projection.
 npm install maplibre-proj
 ```
 
-Peer dependencies: `backproj`, `maplibre-gl` (>=5.0.0), `proj-wasm`
+Peer dependencies: `backproj` (>=0.0.2), `maplibre-gl` (>=5.0.0), `proj-wasm` (>=0.1.0-alpha7), `@wcohen/wasmts` (>=0.1.0-alpha4)
 
 ```typescript
 import { Map as MapGL } from 'maplibre-gl';
@@ -75,7 +77,7 @@ const map = new MapGL({
 map.fitBounds(bounds, { animate: false });
 ```
 
-`reprojectStyle` reprojects all inline GeoJSON source data, sets the projection to Mercator, and returns the modified style with fake bounds for `fitBounds`.
+`reprojectStyle` reprojects inline GeoJSON source data and rewires vector tile sources through a reprojection pipeline (worker pool + wasmts geometry engine). The returned style uses Mercator internally with fake coordinates that produce the target projection visually.
 
 ## How it works
 
