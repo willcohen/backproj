@@ -1205,9 +1205,16 @@ async function init() {
 
   await initProj();
 
-  // Load CRS catalog
+  // Load CRS catalog (dedup: PROJ returns multiple rows per CRS when there are multiple usage entries)
   const catalog = await proj.getCrsInfoListFromDatabase({ auth_name: '', types: [15] }); // 15 = PJ_TYPE_PROJECTED_CRS
-  state.projectedCRS = catalog.filter(e => !e.deprecated);
+  const seen = new Set();
+  state.projectedCRS = catalog.filter(e => {
+    if (e.deprecated) return false;
+    const key = `${e.auth_name}:${e.code}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   const hash = parseHash();
   const initialCRS = hash.crs || DEFAULT_CRS;
