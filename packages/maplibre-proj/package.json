@@ -1,6 +1,6 @@
 {
   "name": "maplibre-proj",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Any projection in MapLibre GL JS via backproj",
   "type": "module",
   "main": "dist/maplibre-proj.mjs",
@@ -20,18 +20,15 @@
     "build:dev": "esbuild src/index.ts --bundle --format=esm --external:proj-wasm --external:maplibre-gl --external:backproj --external:lru-cache --sourcemap --outfile=dist/maplibre-proj.mjs && tsc --build",
     "check": "tsc --noEmit"
   },
+  "dependencies": {
+    "backproj": ">=0.0.3"
+  },
   "peerDependencies": {
     "@wcohen/wasmts": ">=0.1.0-alpha4",
-    "backproj": ">=0.0.2",
-    "maplibre-gl": ">=5.0.0",
-    "proj-wasm": ">=0.1.0-alpha7"
+    "maplibre-gl": ">=5.0.0"
   },
   "devDependencies": {
-    "@wcohen/wasmts": "^0.1.0-alpha4",
-    "backproj": "*",
     "esbuild": "^0.27.3",
-    "maplibre-gl": "^5.20.0",
-    "proj-wasm": "^0.1.0-alpha7",
     "typescript": "^5.9.3"
   },
   "license": "MIT"

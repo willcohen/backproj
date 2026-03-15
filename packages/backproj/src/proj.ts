@@ -393,15 +393,38 @@ export async function buildTransformerPool(
 /**
  * Transform an array of [lon, lat] coordinates through the pipeline,
  * returning fake [lon, lat] that a Web Mercator renderer displays as the
- * target projection.
+ * target projection. Thin wrapper around transformCoordsF64.
+ */
+export async function transformCoords(
+  coords: [number, number][],
+  transformer: Transformer,
+): Promise<[number, number][]> {
+  const n = coords.length;
+  if (n === 0) return [];
+
+  const f64 = new Float64Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    f64[i * 4] = coords[i][0];
+    f64[i * 4 + 1] = coords[i][1];
+  }
+
+  const result = await transformCoordsF64(f64, transformer);
+
+  const out: [number, number][] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = [result[i * 4], result[i * 4 + 1]];
+  }
+  return out;
+}
+
+/**
+ * Transform coordinates in stride-4 Float64Array layout through the pipeline.
+ * This is the sole transform engine -- transformCoords delegates here.
  *
  * Pipeline:
  *   lon/lat -> tFwd (WASM) -> proj_x, proj_y
  *   -> affine: x * Sx + Ox, y * Sy + Oy  (JS, produces Mercator metres)
  *   -> tInvMerc (WASM) -> fake lon/lat
- *
- * For regional CRS the affine shifts the projected region to its Mercator
- * position (Ox/Oy != 0). For global CRS the affine is scale-only (Ox=Oy=0).
  *
  * Uses exactly 2 batch WASM calls (projTransArray) regardless of array size.
  * Between passes, reads/writes the coord-array's underlying Float64Array
@@ -410,68 +433,6 @@ export async function buildTransformerPool(
  * PERF: DO NOT replace direct buffer access with proj.getCoords() calls.
  * getCoords sends a postMessage round-trip per coordinate per call.
  */
-export async function transformCoords(
-  coords: [number, number][],
-  transformer: Transformer,
-): Promise<[number, number][]> {
-  const { _tFwd, _tInvMerc, _Sx, _Sy, _Ox, _Oy } = transformer;
-  const n = coords.length;
-  if (n === 0) return [];
-  const enabled = __DEV__ && profiling.enabled;
-
-  let tAlloc1 = 0, tSet1 = 0, tTrans1 = 0, tGet1 = 0;
-  let tAlloc2 = 0, tSet2 = 0, tTrans2 = 0, tGet2 = 0;
-
-  if (__DEV__ && enabled) tAlloc1 = performance.now();
-  const fwdBuf = await proj.coordArray(n);
-  if (__DEV__ && enabled) tAlloc1 = performance.now() - tAlloc1;
-
-  if (__DEV__ && enabled) tSet1 = performance.now();
-  await proj.setCoords(fwdBuf, coords.map(([lon, lat]) => [lon, lat, 0, 0]));
-  if (__DEV__ && enabled) tSet1 = performance.now() - tSet1;
-
-  if (__DEV__ && enabled) tTrans1 = performance.now();
-  await proj.projTransArray({ p: _tFwd, direction: 1, n, coord: fwdBuf });
-  if (__DEV__ && enabled) tTrans1 = performance.now() - tTrans1;
-
-  if (__DEV__ && enabled) tGet1 = performance.now();
-  if (__DEV__ && enabled) tAlloc2 = performance.now();
-  const invBuf = await proj.coordArray(n);
-  if (__DEV__ && enabled) tAlloc2 = performance.now() - tAlloc2;
-  const fwdF64: Float64Array = (fwdBuf as any).buffer;
-  const invF64: Float64Array = (invBuf as any).buffer;
-  for (let i = 0; i < n; i++) {
-    const off = i * 4;
-    invF64[off]     = fwdF64[off]     * _Sx + _Ox;
-    invF64[off + 1] = fwdF64[off + 1] * _Sy + _Oy;
-    invF64[off + 2] = 0;
-    invF64[off + 3] = 0;
-  }
-  if (__DEV__ && enabled) tGet1 = performance.now() - tGet1;
-  if (__DEV__ && enabled) tSet2 = 0;
-
-  if (__DEV__ && enabled) tTrans2 = performance.now();
-  await proj.projTransArray({ p: _tInvMerc, direction: 1, n, coord: invBuf });
-  if (__DEV__ && enabled) tTrans2 = performance.now() - tTrans2;
-
-  if (__DEV__ && enabled) tGet2 = performance.now();
-  const result: [number, number][] = new Array(n);
-  for (let i = 0; i < n; i++) {
-    const off = i * 4;
-    result[i] = [invF64[off], invF64[off + 1]];
-  }
-  if (__DEV__ && enabled) {
-    tGet2 = performance.now() - tGet2;
-    console.debug(
-      `[backproj:transformCoords] n=${n}`,
-      `fwd: alloc=${tcFmtMs(tAlloc1)} set=${tcFmtMs(tSet1)} trans=${tcFmtMs(tTrans1)} get=${tcFmtMs(tGet1)}`,
-      `inv: alloc=${tcFmtMs(tAlloc2)} set=${tcFmtMs(tSet2)} trans=${tcFmtMs(tTrans2)} get=${tcFmtMs(tGet2)}`,
-    );
-  }
-
-  return result;
-}
-
 export async function transformCoordsF64(
   coords: Float64Array,
   transformer: Transformer,
@@ -480,25 +441,41 @@ export async function transformCoordsF64(
   const n = coords.length / 4;
   if (n === 0) return new Float64Array(0);
 
+  const enabled = __DEV__ && profiling.enabled;
+  let tAlloc = 0, tTrans1 = 0, tAffine = 0, tTrans2 = 0;
+
+  if (__DEV__ && enabled) tAlloc = performance.now();
   const fwdBuf = await proj.coordArray(n);
   const fwdF64: Float64Array = (fwdBuf as any).buffer;
   fwdF64.set(coords);
+  if (__DEV__ && enabled) tAlloc = performance.now() - tAlloc;
 
+  if (__DEV__ && enabled) tTrans1 = performance.now();
   await proj.projTransArray({ p: _tFwd, direction: 1, n, coord: fwdBuf });
+  if (__DEV__ && enabled) tTrans1 = performance.now() - tTrans1;
 
+  if (__DEV__ && enabled) tAffine = performance.now();
   const invBuf = await proj.coordArray(n);
   const invF64: Float64Array = (invBuf as any).buffer;
   for (let i = 0; i < n; i++) {
     const off = i * 4;
     invF64[off]     = fwdF64[off]     * _Sx + _Ox;
     invF64[off + 1] = fwdF64[off + 1] * _Sy + _Oy;
-    // Zero z/t slots: Emscripten heap comes from malloc (not calloc), so stale
-    // data may remain. proj-wasm reads all 4 components per coordinate.
     invF64[off + 2] = 0;
     invF64[off + 3] = 0;
   }
+  if (__DEV__ && enabled) tAffine = performance.now() - tAffine;
 
+  if (__DEV__ && enabled) tTrans2 = performance.now();
   await proj.projTransArray({ p: _tInvMerc, direction: 1, n, coord: invBuf });
+  if (__DEV__ && enabled) tTrans2 = performance.now() - tTrans2;
+
+  if (__DEV__ && enabled) {
+    console.debug(
+      `[backproj:transformCoordsF64] n=${n}`,
+      `alloc=${tcFmtMs(tAlloc)} fwd=${tcFmtMs(tTrans1)} affine=${tcFmtMs(tAffine)} inv=${tcFmtMs(tTrans2)}`,
+    );
+  }
 
   return new Float64Array(invF64);
 }

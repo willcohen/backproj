@@ -173,6 +173,9 @@ function handlePhase1(msg: {
         densifyMs: acc!.densifyMs,
         coordExtractMs: acc!.coordExtractMs,
         coordsProduced: acc!.coordsProduced,
+        geojsonReadMs: acc!.geojsonReadMs,
+        preDensifyCoords: acc!.preDensifyCoords,
+        postDensifyCoords: acc!.postDensifyCoords,
       },
     } : undefined;
 
@@ -214,19 +217,12 @@ function handlePhase2(msg: {
     const enabled = __DEV__ && workerProfilingEnabled;
     let tPhase2 = 0;
     if (__DEV__ && enabled) tPhase2 = performance.now();
-
-    // TODO: replace with wts.geom.createEnvelope()+toGeometry() to avoid
-    // GeoJSONReader parse overhead per tile.
-    const clipEnvelope = wts.io.GeoJSONReader.read(JSON.stringify({
-      type: 'Polygon',
-      coordinates: [[
-        [msg.fakeBounds.west, msg.fakeBounds.south],
-        [msg.fakeBounds.east, msg.fakeBounds.south],
-        [msg.fakeBounds.east, msg.fakeBounds.north],
-        [msg.fakeBounds.west, msg.fakeBounds.north],
-        [msg.fakeBounds.west, msg.fakeBounds.south],
-      ]],
-    }));
+    const clipEnvelope = wts.geom.toGeometry(
+      wts.geom.createEnvelope(
+        msg.fakeBounds.west, msg.fakeBounds.east,
+        msg.fakeBounds.south, msg.fakeBounds.north,
+      )
+    );
     const pm = wts.geom.PrecisionModel.createFixed(msg.scale);
     const clipEnv = wts.geom.getEnvelopeInternal(clipEnvelope);
     const clipMinX = clipEnv.getMinX(), clipMaxX = clipEnv.getMaxX();
@@ -264,7 +260,8 @@ function handlePhase2(msg: {
     const debugTile = workerDebugLabels
       ? { z: msg.outputZ, x: msg.outputX, y: msg.outputY }
       : null;
-    const data = encodeTilePbf(layers, msg.fakeBounds, wts, debugTile, msg.debugInputBounds, msg.debugInputLabels);
+    const writeAcc = __DEV__ && enabled ? { ms: 0 } : null;
+    const data = encodeTilePbf(layers, msg.fakeBounds, wts, debugTile, msg.debugInputBounds, msg.debugInputLabels, writeAcc);
     let encodeMs = 0;
     if (__DEV__ && enabled) encodeMs = performance.now() - tEncode;
 
@@ -272,7 +269,9 @@ function handlePhase2(msg: {
       phase2Ms: performance.now() - tPhase2,
       phase2Detail: {
         applyMs: acc!.applyMs,
-        fixMs: acc!.fixMs,
+        isValidMs: acc!.isValidMs,
+        fixRepairMs: acc!.fixRepairMs,
+        fixRepairCount: acc!.fixRepairCount,
         clipMs: acc!.clipMs,
         clipEmptyCount: acc!.clipEmptyCount,
         skipClipCount: acc!.skipClipCount,
@@ -280,6 +279,7 @@ function handlePhase2(msg: {
         encodeMs,
         outputFeatureCount,
         outputBytes: data.byteLength,
+        geojsonWriteMs: writeAcc ? writeAcc.ms : 0,
       },
     } : undefined;
 

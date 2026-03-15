@@ -21,7 +21,7 @@ Projection-agnostic coordinate transformation. No map renderer dependency.
 npm install backproj
 ```
 
-Peer dependencies: `proj-wasm` (>=0.1.0-alpha7), `@wcohen/wasmts` (>=0.1.0-alpha4, for MVT reprojection)
+Peer dependency: `@wcohen/wasmts` (>=0.1.0-alpha4, for MVT reprojection)
 
 ```typescript
 import { initProj, buildTransformer, transformCoords, reprojectGeoJSON } from 'backproj';
@@ -57,7 +57,7 @@ Thin wrapper that reprojects a MapLibre style for display in any projection.
 npm install maplibre-proj
 ```
 
-Peer dependencies: `backproj` (>=0.0.2), `maplibre-gl` (>=5.0.0), `proj-wasm` (>=0.1.0-alpha7), `@wcohen/wasmts` (>=0.1.0-alpha4)
+Peer dependencies: `maplibre-gl` (>=5.0.0), `@wcohen/wasmts` (>=0.1.0-alpha4)
 
 ```typescript
 import { Map as MapGL } from 'maplibre-gl';

@@ -21,8 +21,8 @@
     "resource-tracker": "https://cdn.jsdelivr.net/npm/resource-tracker@0.0.1-alpha1/resource.mjs",
     "proj-wasm": "https://cdn.jsdelivr.net/npm/proj-wasm@0.1.0-alpha7/dist/proj.mjs",
     "maplibre-gl": "https://esm.sh/maplibre-gl@5.20.0?bundle-deps",
-    "backproj": "https://cdn.jsdelivr.net/npm/backproj@0.0.2/dist/backproj.mjs",
-    "maplibre-proj": "https://cdn.jsdelivr.net/npm/maplibre-proj@0.0.2/dist/maplibre-proj.mjs",
+    "backproj": "https://cdn.jsdelivr.net/npm/backproj@0.0.3/dist/backproj.mjs",
+    "maplibre-proj": "https://cdn.jsdelivr.net/npm/maplibre-proj@0.0.3/dist/maplibre-proj.mjs",
     "lru-cache": "https://cdn.jsdelivr.net/npm/lru-cache@11.2.6/dist/esm/index.js",
     "pbf": "https://esm.sh/pbf@4.0.1",
     "@mapbox/vector-tile": "https://esm.sh/@mapbox/vector-tile@2.0.3",
@@ -560,6 +560,7 @@ function parseHash() {
     y: params.has('y') ? Number(params.get('y')) : null,
     data: params.get('data') || null,
     grid: params.get('grid') === '1',
+    profile: params.get('profile') === '1',
   };
 }
 
@@ -1219,6 +1220,12 @@ async function init() {
   const hash = parseHash();
   const initialCRS = hash.crs || DEFAULT_CRS;
   const dataMode = hash.data || 'mvt';
+
+  if (hash.profile) {
+    enableProfiling();
+    document.getElementById('profiling-section').style.display = '';
+    document.getElementById('profiling-toggle').checked = true;
+  }
 
   const initialEntry = state.projectedCRS.find(e => `${e.auth_name}:${e.code}` === initialCRS);
   crsChipCode.textContent = initialCRS;

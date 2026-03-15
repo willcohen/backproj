@@ -31,11 +31,16 @@ export interface Phase1Detail {
   densifyMs: number;
   coordExtractMs: number;
   coordsProduced: number;
+  geojsonReadMs: number;
+  preDensifyCoords: number;
+  postDensifyCoords: number;
 }
 
 export interface Phase2Detail {
   applyMs: number;
-  fixMs: number;
+  isValidMs: number;
+  fixRepairMs: number;
+  fixRepairCount: number;
   clipMs: number;
   clipEmptyCount: number;
   skipClipCount: number;
@@ -43,6 +48,7 @@ export interface Phase2Detail {
   encodeMs: number;
   outputFeatureCount: number;
   outputBytes: number;
+  geojsonWriteMs: number;
 }
 
 export interface WorkerProfile {
@@ -240,6 +246,7 @@ export function printProfilingSummary(): void {
       ['stitch', avgOf(t => t.worker.phase1Detail.stitchMs)],
       ['densify', avgOf(t => t.worker.phase1Detail.densifyMs)],
       ['coordExtract', avgOf(t => t.worker.phase1Detail.coordExtractMs)],
+      ['geojsonRead', avgOf(t => t.worker.phase1Detail.geojsonReadMs)],
     ];
     p1ops.sort((a, b) => b[1] - a[1]);
     for (const [name, ms] of p1ops) {
@@ -250,17 +257,22 @@ export function printProfilingSummary(): void {
     const avgFragments = avgOf(t => t.worker.phase1Detail.fragmentCount);
     const avgStitches = avgOf(t => t.worker.phase1Detail.stitchCount);
     const avgCoords = avgOf(t => t.worker.phase1Detail.coordsProduced);
-    lines.push(`  counts: ${Math.round(avgFeatures)} features, ${Math.round(avgFragments)} fragments, ${Math.round(avgStitches)} stitches, ${Math.round(avgCoords)} coords`);
+    const avgPreDensify = avgOf(t => t.worker.phase1Detail.preDensifyCoords);
+    const avgPostDensify = avgOf(t => t.worker.phase1Detail.postDensifyCoords);
+    const ratio = avgPreDensify > 0 ? (avgPostDensify / avgPreDensify).toFixed(1) : 'N/A';
+    lines.push(`  counts: ${Math.round(avgFeatures)} features, ${Math.round(avgFragments)} fragments, ${Math.round(avgStitches)} stitches, ${Math.round(avgCoords)} coords, densify ratio: ${ratio}x`);
     lines.push('');
 
     const avgPhase2 = avgOf(t => t.worker.phase2Ms) || 1;
     lines.push('Phase 2 detail (% of phase2 time):');
     const p2ops: [string, number][] = [
       ['apply', avgOf(t => t.worker.phase2Detail.applyMs)],
-      ['fix', avgOf(t => t.worker.phase2Detail.fixMs)],
+      ['isValid', avgOf(t => t.worker.phase2Detail.isValidMs)],
+      ['fixRepair', avgOf(t => t.worker.phase2Detail.fixRepairMs)],
       ['clip', avgOf(t => t.worker.phase2Detail.clipMs)],
       ['precision', avgOf(t => t.worker.phase2Detail.precisionMs)],
       ['encode', avgOf(t => t.worker.phase2Detail.encodeMs)],
+      ['geojsonWrite', avgOf(t => t.worker.phase2Detail.geojsonWriteMs)],
     ];
     p2ops.sort((a, b) => b[1] - a[1]);
     for (const [name, ms] of p2ops) {
@@ -271,7 +283,8 @@ export function printProfilingSummary(): void {
     const avgSkipClip = avgOf(t => t.worker.phase2Detail.skipClipCount);
     const avgOutFeatures = avgOf(t => t.worker.phase2Detail.outputFeatureCount);
     const avgOutBytes = avgOf(t => t.worker.phase2Detail.outputBytes);
-    lines.push(`  counts: ${Math.round(avgOutFeatures)} output features, ${Math.round(avgClipEmpty)} clipped empty, ${Math.round(avgSkipClip)} skip clip, ${Math.round(avgOutBytes)} output bytes`);
+    const avgFixRepairs = avgOf(t => t.worker.phase2Detail.fixRepairCount);
+    lines.push(`  counts: ${Math.round(avgOutFeatures)} output features, ${Math.round(avgClipEmpty)} clipped empty, ${Math.round(avgSkipClip)} skip clip, ${Math.round(avgFixRepairs)} fix repairs, ${Math.round(avgOutBytes)} output bytes`);
     lines.push('');
   }
 

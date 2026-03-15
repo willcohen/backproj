@@ -20,8 +20,7 @@ export {
 export type { TileCoord } from './tiling.js';
 export { decodeTile, decodeAndGroupTiles } from './mvt-decode.js';
 export type { DecodedFeature, GroupedFeatures } from './mvt-decode.js';
-export { reprojectTile } from './mvt.js';
-export type { FetchTileFn, OutputFeature } from './mvt.js';
+export type { FetchTileFn, OutputFeature } from './mvt-pipeline.js';
 export { createTileCache } from './tile-cache.js';
 export type { TileCacheOptions } from './tile-cache.js';
 export { createTileProcessor, shutdownTileWorkers, debugConfig } from './tile-processor.js';

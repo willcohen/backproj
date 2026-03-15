@@ -61,6 +61,7 @@ export function encodeTilePbf(
   debugTile?: DebugTileInfo | null,
   debugInputBounds?: number[][][] | null,
   debugInputLabels?: { label: string; cx: number; cy: number }[] | null,
+  geojsonWriteAcc?: { ms: number } | null,
 ): ArrayBuffer {
   const gvtLayers: Record<string, GvtLayer> = {};
 
@@ -70,7 +71,7 @@ export function encodeTilePbf(
     for (const feature of features) {
       for (const geom of feature.geometries) {
         const gvtFeature = geomToGvtFeature(
-          geom, feature.properties, fakeBounds, wts,
+          geom, feature.properties, fakeBounds, wts, geojsonWriteAcc,
         );
         if (gvtFeature) gvtFeatures.push(gvtFeature);
       }
@@ -164,9 +165,13 @@ function geomToGvtFeature(
   properties: Record<string, any>,
   fakeBounds: { west: number; south: number; east: number; north: number },
   wts: typeof import('@wcohen/wasmts'),
+  geojsonWriteAcc?: { ms: number } | null,
 ): GvtFeature | null {
+  let t0 = 0;
+  if (geojsonWriteAcc) t0 = performance.now();
   const geojsonStr = wts.io.GeoJSONWriter.write(geom);
   const geojson = JSON.parse(geojsonStr);
+  if (geojsonWriteAcc) geojsonWriteAcc.ms += performance.now() - t0;
 
   const type = gvtType(geojson.type);
   if (!type) return null;

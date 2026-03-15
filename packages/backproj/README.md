@@ -11,10 +11,10 @@ JS integration, see [maplibre-proj](../maplibre-proj/).
 ## Install
 
 ```
-npm install backproj proj-wasm
+npm install backproj
 ```
 
-For MVT reprojection, also install the geometry engine:
+For MVT reprojection, also install the geometry engine (peer dependency):
 
 ```
 npm install @wcohen/wasmts
@@ -104,12 +104,6 @@ Geographic CRS (e.g. `EPSG:4326`) and interrupted projections are rejected.
 |---|---|
 | `createTileProcessor(wasmtsUrl?)` | Create/return a shared worker pool. |
 | `shutdownTileWorkers()` | Terminate all workers. |
-
-### MVT single-thread (`mvt.ts`)
-
-| Export | Description |
-|---|---|
-| `reprojectTile(z, x, y, transformer, fetchTile, wts, cache?)` | Full pipeline on main thread. Requires wasmts instance. |
 
 ### Tile math (`tiling.ts`)
 

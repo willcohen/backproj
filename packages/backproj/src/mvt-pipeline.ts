@@ -49,6 +49,9 @@ export interface Phase1Accumulator {
   densifyMs: number;
   coordExtractMs: number;
   coordsProduced: number;
+  geojsonReadMs: number;
+  preDensifyCoords: number;
+  postDensifyCoords: number;
 }
 
 export function createPhase1Accumulator(): Phase1Accumulator {
@@ -56,20 +59,25 @@ export function createPhase1Accumulator(): Phase1Accumulator {
     featureCount: 0, fragmentCount: 0,
     stitchMs: 0, stitchCount: 0,
     densifyMs: 0, coordExtractMs: 0, coordsProduced: 0,
+    geojsonReadMs: 0,
+    preDensifyCoords: 0, postDensifyCoords: 0,
   };
 }
 
 export interface Phase2Accumulator {
   applyMs: number;
-  fixMs: number;
+  isValidMs: number;
+  fixRepairMs: number;
+  fixRepairCount: number;
   clipMs: number;
   clipEmptyCount: number;
   skipClipCount: number;
   precisionMs: number;
+  geojsonWriteMs: number;
 }
 
 export function createPhase2Accumulator(): Phase2Accumulator {
-  return { applyMs: 0, fixMs: 0, clipMs: 0, clipEmptyCount: 0, skipClipCount: 0, precisionMs: 0 };
+  return { applyMs: 0, isValidMs: 0, fixRepairMs: 0, fixRepairCount: 0, clipMs: 0, clipEmptyCount: 0, skipClipCount: 0, precisionMs: 0, geojsonWriteMs: 0 };
 }
 
 // TODO: return Float64Array directly instead of [number,number][] to
@@ -89,9 +97,11 @@ export function processFeaturePhase1(
   const isPoint = fragments[0].geometry?.type === 'Point' || fragments[0].geometry?.type === 'MultiPoint';
   const parseFragments = isPoint ? [fragments[0]] : fragments;
 
+  if (__DEV__ && acc) t = performance.now();
   const geoms = parseFragments.map(f =>
     wts.io.GeoJSONReader.read(JSON.stringify(f.geometry))
   );
+  if (__DEV__ && acc) acc.geojsonReadMs += performance.now() - t;
 
   let geom: WasmGeometry;
   if (geoms.length === 1) {
@@ -115,6 +125,7 @@ export function processFeaturePhase1(
   if (__DEV__ && acc) t = performance.now();
   const tolerance = densifyTolerance(z);
   const preCoords = wts.geom.getCoordinates(geom);
+  if (__DEV__ && acc) acc.preDensifyCoords += preCoords.length;
   let maxEdge = 0;
   for (let j = 1; j < preCoords.length; j++) {
     const dx = preCoords[j].x - preCoords[j - 1].x;
@@ -140,6 +151,7 @@ export function processFeaturePhase1(
   if (__DEV__ && acc) {
     acc.coordExtractMs += performance.now() - t;
     acc.coordsProduced += pairs.length;
+    acc.postDensifyCoords += pairs.length;
   }
 
   return { coords: pairs, geom };
@@ -178,12 +190,17 @@ export function processFeaturePhase2(
   geom = wts.geom.applyCoordinates(geom, transformedCoords, valuesPerCoord);
   if (__DEV__ && acc) acc.applyMs += performance.now() - t;
 
-  // Coordinate transform + apply can introduce invalidity.
-  if (__DEV__ && acc) t = performance.now();
-  if (!wts.geom.isValid(geom)) {
-    geom = wts.geom.util.GeometryFixer.fix(geom);
+  if (!isPoint) {
+    if (__DEV__ && acc) t = performance.now();
+    const valid = wts.geom.isValid(geom);
+    if (__DEV__ && acc) acc.isValidMs += performance.now() - t;
+    if (!valid) {
+      const tFix = performance.now();
+      geom = wts.geom.util.GeometryFixer.fix(geom);
+      const fixElapsed = performance.now() - tFix;
+      if (__DEV__ && acc) { acc.fixRepairMs += fixElapsed; acc.fixRepairCount++; }
+    }
   }
-  if (__DEV__ && acc) acc.fixMs += performance.now() - t;
 
   // Skip clipping for point features — they don't need geometric intersection,
   // and clipping drops labels whose anchor falls just outside the tile edge.
@@ -191,16 +208,19 @@ export function processFeaturePhase2(
   if (isPoint) {
     if (__DEV__ && acc) acc.skipClipCount++;
   } else {
-    // Features fully inside the clip envelope skip the WASM intersection() call.
-    const fullyInside = minX >= clipMinX && maxX <= clipMaxX &&
-                        minY >= clipMinY && maxY <= clipMaxY;
+    const clipW = clipMaxX - clipMinX;
+    const clipH = clipMaxY - clipMinY;
+    const clipBuf = Math.min(clipW, clipH) * 0.01;
+    const fullyInside = minX >= clipMinX - clipBuf && maxX <= clipMaxX + clipBuf &&
+                        minY >= clipMinY - clipBuf && maxY <= clipMaxY + clipBuf;
 
     if (fullyInside) {
       if (__DEV__ && acc) acc.skipClipCount++;
     } else {
-      if (__DEV__ && acc) t = performance.now();
+      const tClip = performance.now();
       geom = wts.geom.intersection(geom, clipEnvelope);
-      if (__DEV__ && acc) acc.clipMs += performance.now() - t;
+      const clipElapsed = performance.now() - tClip;
+      if (__DEV__ && acc) acc.clipMs += clipElapsed;
 
       if (wts.geom.isEmpty(geom)) {
         if (__DEV__ && acc) acc.clipEmptyCount++;

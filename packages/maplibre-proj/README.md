@@ -7,10 +7,10 @@ reprojection and MVT tile reprojection via protocol handlers.
 ## Install
 
 ```
-npm install maplibre-proj backproj proj-wasm maplibre-gl
+npm install maplibre-proj maplibre-gl
 ```
 
-For MVT reprojection (vector tile sources), also install:
+For MVT reprojection (vector tile sources), also install the geometry engine (peer dependency):
 
 ```
 npm install @wcohen/wasmts

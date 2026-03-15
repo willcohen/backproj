@@ -586,13 +586,14 @@ function emptyPhase1Detail(): import('./profiling.js').Phase1Detail {
   return {
     decodeMs: 0, featureCount: 0, fragmentCount: 0,
     stitchMs: 0, stitchCount: 0,
-    densifyMs: 0, coordExtractMs: 0, coordsProduced: 0,
+    densifyMs: 0, coordExtractMs: 0, coordsProduced: 0, geojsonReadMs: 0,
+    preDensifyCoords: 0, postDensifyCoords: 0,
   };
 }
 
 function emptyPhase2Detail(): import('./profiling.js').Phase2Detail {
   return {
-    applyMs: 0, fixMs: 0, clipMs: 0, clipEmptyCount: 0, skipClipCount: 0,
-    precisionMs: 0, encodeMs: 0, outputFeatureCount: 0, outputBytes: 0,
+    applyMs: 0, isValidMs: 0, fixRepairMs: 0, fixRepairCount: 0, clipMs: 0, clipEmptyCount: 0, skipClipCount: 0,
+    precisionMs: 0, encodeMs: 0, outputFeatureCount: 0, outputBytes: 0, geojsonWriteMs: 0,
   };
 }
