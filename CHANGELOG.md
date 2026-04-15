@@ -1,5 +1,33 @@
 # Change Log
 
+## [0.0.4] - 2026-04-15
+
+### Added
+- Single-call PROJ pipeline: forward + affine + inverse Mercator collapse
+  into one WASM call via `proj_create`. Falls back to two-call path for
+  compound CRS
+- Global projection support: Robinson, Mollweide, Eckert IV, and other
+  world projections now render correctly
+- Initial test suite and benchmark
+- Local dev server with COOP/COEP headers
+
+### Fixed
+- Aspect ratio distortion on global projections: tile-local Y was encoded
+  linear in latitude instead of Mercator Y. Uniform affine scale now preserves
+  aspect ratio
+- Broken geometry at low zoom: pre-clip features to a
+  90-degree geographic grid before reprojecting, to avoid globe-spanning polygons producing
+  irrecoverable topology errors after reprojection
+
+### Changed
+- `getWorldBounds` computes correct reprojected extent
+- Inverse Mercator transform shared as singleton (minor performance
+  improvement)
+- proj-wasm bumped to `^0.1.0-alpha8` (PROJ 9.8.0 to 9.8.1)
+
+### Known Limitations
+- Interrupted projections (Goode Homolosine, etc.) are not supported
+
 ## [0.0.3] - 2026-03-15
 
 ### Changed
@@ -47,7 +75,7 @@
   - Default layers: Natural Earth 110m land, graticules, and countries
   - coi-serviceworker for SharedArrayBuffer on static hosting
 
-[Unreleased]: https://github.com/willcohen/backproj/compare/0.0.3...HEAD
+[0.0.4]: https://github.com/willcohen/backproj/compare/0.0.3...0.0.4
 [0.0.3]: https://github.com/willcohen/backproj/compare/0.0.2...0.0.3
 [0.0.2]: https://github.com/willcohen/backproj/compare/0.0.1...0.0.2
 [0.0.1]: https://github.com/willcohen/backproj/compare/0.0.1

@@ -122,8 +122,9 @@ export async function reprojectStyle(options: {
   const aou = transformer._areaOfUse;
   const isRegional = transformer._Ox !== 0 || transformer._Oy !== 0;
   if (aou && isRegional) {
-    const padLon = (aou.east - aou.west) * 0.1;
-    const padLat = (aou.north - aou.south) * 0.1;
+    const MAX_BOUNDS_PADDING = 0.10;
+    const padLon = (aou.east - aou.west) * MAX_BOUNDS_PADDING;
+    const padLat = (aou.north - aou.south) * MAX_BOUNDS_PADDING;
     const mbCorners = await transformCoords(
       [
         [Math.max(-180, aou.west - padLon), Math.max(-89.999999, aou.south - padLat)],

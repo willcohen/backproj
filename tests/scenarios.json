@@ -1,0 +1,36 @@
+[
+  {
+    "crs": "EPSG:2249",
+    "waypoints": [
+      { "lon": -71.058, "lat": 42.360, "zoom": 10, "durationMs": 0,    "label": "Jump to Boston z10" },
+      { "lon": -71.058, "lat": 42.360, "zoom": 12, "durationMs": 2000, "label": "Zoom to z12" },
+      { "lon": -71.094, "lat": 42.360, "zoom": 12, "durationMs": 3000, "label": "Pan to Cambridge" },
+      { "lon": -71.040, "lat": 42.345, "zoom": 13, "durationMs": 3000, "label": "South Boston + zoom z13" },
+      { "lon": -71.081, "lat": 42.349, "zoom": 13, "durationMs": 3000, "label": "Pan to Back Bay" },
+      { "lon": -71.097, "lat": 42.347, "zoom": 12, "durationMs": 3000, "label": "Fenway + zoom z12" },
+      { "lon": -71.058, "lat": 42.360, "zoom": 12, "durationMs": 2000, "label": "Return to Boston" }
+    ]
+  },
+  {
+    "crs": "EPSG:5070",
+    "waypoints": [
+      { "lon": -98.5,  "lat": 39.8, "zoom": 4, "durationMs": 0,    "label": "Jump to US center z4" },
+      { "lon": -98.5,  "lat": 39.8, "zoom": 6, "durationMs": 3000, "label": "Zoom to z6" },
+      { "lon": -122.4, "lat": 37.8, "zoom": 7, "durationMs": 4000, "label": "Pan to SF z7" },
+      { "lon": -87.6,  "lat": 41.9, "zoom": 7, "durationMs": 4000, "label": "Pan to Chicago z7" },
+      { "lon": -73.9,  "lat": 40.7, "zoom": 8, "durationMs": 4000, "label": "Pan to NYC z8" },
+      { "lon": -98.5,  "lat": 39.8, "zoom": 5, "durationMs": 3000, "label": "Return to center z5" }
+    ]
+  },
+  {
+    "crs": "ESRI:54030",
+    "waypoints": [
+      { "lon": 0,    "lat": 20, "zoom": 1, "durationMs": 0,    "label": "Jump to world z1" },
+      { "lon": 0,    "lat": 20, "zoom": 3, "durationMs": 3000, "label": "Zoom to z3" },
+      { "lon": 100,  "lat": 30, "zoom": 3, "durationMs": 4000, "label": "Pan to Asia z3" },
+      { "lon": -60,  "lat": -15, "zoom": 3, "durationMs": 4000, "label": "Pan to S. America z3" },
+      { "lon": 20,   "lat": 0, "zoom": 4, "durationMs": 4000, "label": "Pan to Africa z4" },
+      { "lon": 0,    "lat": 20, "zoom": 2, "durationMs": 3000, "label": "Return to world z2" }
+    ]
+  }
+]

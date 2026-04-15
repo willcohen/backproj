@@ -44,17 +44,35 @@
  * outputs metres, not d3 pixels, so scales do NOT cancel — we must compute
  * explicit affine parameters Sx/Sy/Ox/Oy (see buildTransformer).
  *
- * proj-wasm exposes only the ISO 19111 high-level API, not proj_create().
- * There is no way to inject a raw pipeline string as a single transformer.
- * The working path is:
- *   projCreateCrsToCrs({ source_crs: string, target_crs: string })
- * which accepts any of: PROJ string, EPSG:xxxx, ESRI:xxxx, WKT2, WKT1, PROJJSON.
- * We pass the user's CRS directly as target_crs.
+ * PIPELINE COLLAPSE (single WASM call)
  *
- * Two PROJ transforms + JS affine because proj-wasm only exposes
- * CRS-to-CRS (not proj_create pipelines). With proj_create() this
- * collapses to one WASM call: +proj=pipeline +step +proj=robin
- * +step +proj=affine ... +step +inv +proj=merc
+ * proj-wasm exposes both the ISO 19111 high-level API and projCreate().
+ * For any projected CRS, we extract the coordoperation — the pure map
+ * projection conversion without datum shifts — via:
+ *   projGetTargetCrs -> projCrsGetCoordoperation -> projAsProjString
+ *
+ * This gives us the PROJ pipeline steps (unitconvert, projection, etc.)
+ * which we flatten and append affine + inverse Mercator + unit conversion:
+ *   +proj=pipeline <coordoperation steps> +step +proj=affine ...
+ *   +step +inv +proj=merc +a=6378137 +b=6378137
+ *   +step +proj=unitconvert +xy_in=rad +xy_out=deg
+ *
+ * The result is a single PJ that replaces all three steps. Both forward
+ * (direction=1) and inverse (direction=-1) use this PJ.
+ *
+ * The coordoperation omits datum shifts (~0.1 ft for NAD83), invisible
+ * at display resolution. The critical invariant is that pipeline,
+ * two-call fallback, and inverse all use the same projection and affine.
+ * When the pipeline is available, _tFwd is set to the coordoperation PJ
+ * (not the CRS-to-CRS PJ) so the fallback path is also consistent.
+ *
+ * TWO-CALL FALLBACK
+ *
+ * When the coordoperation cannot be extracted, falls back to the original
+ * two-call path: projCreateCrsToCrs forward + JS affine + invMerc.
+ * This happens for compound CRS (e.g. EPSG:7415 = Amersfoort/RD New +
+ * NAP height) where the target is a CompoundCRS, not a ProjectedCRS.
+ * Works for all simple projected CRS (EPSG, ESRI, PROJ strings, WKT).
  *
  * AXIS ORDER TRAP
  * EPSG:4326 is officially lat/lon (ISO 19111). Passing 'EPSG:4326' as source_crs
@@ -67,6 +85,13 @@ import * as proj from 'proj-wasm';
 import { profiling } from './profiling.js';
 
 const MERC_MAX = 20037508.3427892;
+export const MAX_MERC_LAT = 85.051129;
+
+const REGIONAL_MAX_LON_SPAN = 350;
+const REGIONAL_MAX_LAT_SPAN = 170;
+const EXTENT_SAMPLE_GRID_SIZE = 32;
+const PROJECTED_CRS_PROBE_THRESHOLD = 4;
+const WORLD_BOUNDS_PADDING = 0.20;
 
 /**
  * WGS 84 geographic CRS as PROJJSON, with longitude listed FIRST.
@@ -114,6 +139,7 @@ type PJ = object;
 export interface Transformer {
   readonly _tFwd: PJ;
   readonly _tInvMerc: PJ;
+  readonly _tPipeline?: PJ;
   readonly _Sx: number;
   readonly _Sy: number;
   readonly _Ox: number;
@@ -134,7 +160,7 @@ async function assertIsProjectedCRS(tFwd: PJ, crsString: string): Promise<void> 
   await proj.projTransArray({ p: tFwd, direction: 1, n: 1, coord: buf });
   const x = ((buf as any).buffer as Float64Array)[0];
 
-  if (!isFinite(x) || Math.abs(x) <= 4) {
+  if (!isFinite(x) || Math.abs(x) <= PROJECTED_CRS_PROBE_THRESHOLD) {
     throw new Error(
       `CRS does not appear to be a projected CRS: "${crsString}". ` +
       `Provide a ProjectedCRS (e.g. EPSG:3857, ESRI:54030, a WKT2 PROJCRS, ` +
@@ -143,9 +169,28 @@ async function assertIsProjectedCRS(tFwd: PJ, crsString: string): Promise<void> 
   }
 }
 
+let _sharedInvMerc: PJ | null = null;
+
+/**
+ * Return a shared inverse-Mercator transform (EPSG:3857 -> WGS84 lon/lat).
+ * This transform is independent of the target CRS, so one instance serves
+ * all transformers.
+ */
+async function getSharedInvMerc(): Promise<PJ> {
+  if (!_sharedInvMerc) {
+    const t = await proj.projCreateCrsToCrs({
+      source_crs: 'EPSG:3857',
+      target_crs: WGS84_LON_LAT,
+    });
+    if (!t) throw new Error('Failed to create inverse Mercator transform');
+    _sharedInvMerc = t;
+  }
+  return _sharedInvMerc!;
+}
+
 /**
  * Samples a 33x33 grid of lon/lat through tFwd to find the maximum x and y
- * extents. Throws if <10% of samples are finite (interrupted projection).
+ * extents. Throws if both xMax and yMax are zero.
  *
  * Used only for global-mode CRS to compute Sx = MERC_MAX / xMax. For regional
  * CRS, the affine parameters are computed directly from area-of-use edges
@@ -158,7 +203,7 @@ async function sampleProjectionExtent(
   tFwd: PJ,
   bounds?: { west: number; south: number; east: number; north: number },
 ): Promise<{ xMax: number; yMax: number }> {
-  const N = 32;
+  const N = EXTENT_SAMPLE_GRID_SIZE;
   const total = (N + 1) * (N + 1);
   const samples: [number, number, number, number][] = [];
 
@@ -187,13 +232,6 @@ async function sampleProjectionExtent(
     }
   }
 
-  if (finiteCount < total * 0.1) {
-    throw new Error(
-      'CRS produces finite output for fewer than 10% of sampled points. ' +
-      'Interrupted projections (e.g. Goode Homolosine) are not supported.'
-    );
-  }
-
   if (xMax === 0 || yMax === 0) {
     throw new Error('CRS has zero extent — cannot compute scale factors.');
   }
@@ -206,6 +244,7 @@ async function sampleProjectionExtent(
  * Safe to call multiple times — subsequent calls are no-ops.
  */
 export async function initProj(): Promise<void> {
+  _sharedInvMerc = null;
   await proj.init();
 }
 
@@ -213,11 +252,6 @@ export async function initProj(): Promise<void> {
  * Try to look up the area of use for a CRS from the PROJ database.
  * Works for "AUTH:CODE" format strings (e.g. EPSG:5070, ESRI:54030).
  * Returns undefined for PROJ strings, WKT, or if the lookup fails.
- *
- * Workaround: proj-wasm doesn't expose proj_get_area_of_use(), so we
- * fall back to getCrsInfoListFromDatabase which only works for registered
- * AUTH:CODE identifiers. If proj-wasm added proj_get_area_of_use(), this
- * could work for any PJ object (PROJ strings, WKT, etc.).
  */
 async function lookupAreaOfUse(
   crsString: string,
@@ -226,14 +260,14 @@ async function lookupAreaOfUse(
   if (!match) return undefined;
   const [, authName, code] = match;
   try {
-    const list = await proj.getCrsInfoListFromDatabase({ auth_name: authName, types: [15] }); // 15 = PJ_TYPE_PROJECTED_CRS
+    const list = await proj.projGetCrsInfoListFromDatabase({ auth_name: authName, types: [15] }); // 15 = PJ_TYPE_PROJECTED_CRS
     const entry = list.find((e: any) => e.code === code);
-    if (!entry || entry.west_lon_degree == null) return undefined;
+    if (!entry || entry.westLonDegree == null) return undefined;
     return {
-      west: entry.west_lon_degree,
-      south: entry.south_lat_degree,
-      east: entry.east_lon_degree,
-      north: entry.north_lat_degree,
+      west: entry.westLonDegree,
+      south: entry.southLatDegree,
+      east: entry.eastLonDegree,
+      north: entry.northLatDegree,
     };
   } catch {
     return undefined;
@@ -251,7 +285,8 @@ async function lookupAreaOfUse(
  * computes an affine (scale + offset) by projecting the area-of-use edges
  * through both tFwd and tFwdMerc, then matching extents and centers.
  *
- * Throws if the CRS is geographic, unparseable, or interrupted.
+ * Throws if the CRS is geographic or unparseable. Interrupted projections
+ * (e.g. Goode Homolosine) are not rejected but will produce visual artifacts.
  */
 export async function buildTransformer(crsString: string): Promise<Transformer> {
   const tFwd: PJ | null = await proj.projCreateCrsToCrs({
@@ -265,20 +300,18 @@ export async function buildTransformer(crsString: string): Promise<Transformer> 
 
   await assertIsProjectedCRS(tFwd, crsString);
 
-  // TODO: tInvMerc is constant (independent of target CRS). It could be
-  // created once and shared across all transformers instead of per-call.
-  const tInvMerc: PJ = await proj.projCreateCrsToCrs({
-    source_crs: 'EPSG:3857',
-    target_crs: WGS84_LON_LAT,
-  });
+  const tInvMerc = await getSharedInvMerc();
 
   const areaOfUse = await lookupAreaOfUse(crsString);
+
+  // Extract the coordoperation for pipeline construction.
+  const coordOpInfo = await getCoordoperationInfo(tFwd);
 
   // Regional: area of use < 350 deg lon AND < 170 deg lat (state plane, UTM, etc.)
   // Global: everything else (Robinson, Mollweide, full-world projections)
   const isRegional = areaOfUse
-    && (areaOfUse.east - areaOfUse.west) < 350
-    && (areaOfUse.north - areaOfUse.south) < 170;
+    && (areaOfUse.east - areaOfUse.west) < REGIONAL_MAX_LON_SPAN
+    && (areaOfUse.north - areaOfUse.south) < REGIONAL_MAX_LAT_SPAN;
 
   if (isRegional) {
     // REGIONAL MODE: affine scale + offset
@@ -289,8 +322,12 @@ export async function buildTransformer(crsString: string): Promise<Transformer> 
     const centerLon = (aou.west + aou.east) / 2;
     const centerLat = (aou.south + aou.north) / 2;
 
-    // Project area-of-use edges and center through tFwd to get
-    // the projected extent (in CRS metres) and the projected center point.
+    // Use convPJ when available so affine matches the pipeline exactly.
+    // Falls back to tFwd for compound CRS where coordoperation extraction fails.
+    const tProj = coordOpInfo ? coordOpInfo.convPJ : tFwd;
+
+    // Project area-of-use edges and center through tProj to get
+    // the projected extent and the projected center point.
     const edgeBuf = await proj.coordArray(5);
     await proj.setCoords(edgeBuf, [
       [aou.west, centerLat, 0, 0],
@@ -299,7 +336,7 @@ export async function buildTransformer(crsString: string): Promise<Transformer> 
       [centerLon, aou.north, 0, 0],
       [centerLon, centerLat, 0, 0],
     ]);
-    await proj.projTransArray({ p: tFwd, direction: 1, n: 5, coord: edgeBuf });
+    await proj.projTransArray({ p: tProj, direction: 1, n: 5, coord: edgeBuf });
     const edgeF64: Float64Array = (edgeBuf as any).buffer;
 
     const projExtentX = edgeF64[1 * 4] - edgeF64[0 * 4];     // east.x - west.x
@@ -343,9 +380,16 @@ export async function buildTransformer(crsString: string): Promise<Transformer> 
     const Ox = mercCenterX - projCenterX * Sx;
     const Oy = mercCenterY - projCenterY * Sy;
 
+    let tPipeline: PJ | undefined;
+    if (coordOpInfo) {
+      const pipeStr = buildPipelineString(coordOpInfo.convStr, Sx, Sy, Ox, Oy);
+      tPipeline = (await proj.projCreate({ definition: pipeStr })) ?? undefined;
+    }
+
     return {
-      _tFwd:      tFwd,
+      _tFwd:      tProj,
       _tInvMerc:  tInvMerc,
+      _tPipeline: tPipeline,
       _Sx:        Sx,
       _Sy:        Sy,
       _Ox:        Ox,
@@ -355,13 +399,39 @@ export async function buildTransformer(crsString: string): Promise<Transformer> 
     };
   }
 
+  let tPipeline: PJ | undefined;
+  let finalTFwd = tFwd;
+
+  if (coordOpInfo) {
+    // Use convPJ for extent sampling so affine matches the pipeline exactly.
+    const { xMax, yMax } = await sampleProjectionExtent(coordOpInfo.convPJ);
+    const S = MERC_MAX / Math.max(xMax, yMax);
+    finalTFwd = coordOpInfo.convPJ;
+    const pipeStr = buildPipelineString(coordOpInfo.convStr, S, S, 0, 0);
+    tPipeline = (await proj.projCreate({ definition: pipeStr })) ?? undefined;
+
+    return {
+      _tFwd:      finalTFwd,
+      _tInvMerc:  tInvMerc,
+      _tPipeline: tPipeline,
+      _Sx:        S,
+      _Sy:        S,
+      _Ox:        0,
+      _Oy:        0,
+      sourceCRS:  crsString,
+      _areaOfUse: areaOfUse,
+    };
+  }
+
   const { xMax, yMax } = await sampleProjectionExtent(tFwd);
+  const S = MERC_MAX / Math.max(xMax, yMax);
 
   return {
     _tFwd:     tFwd,
     _tInvMerc: tInvMerc,
-    _Sx:       MERC_MAX / xMax,
-    _Sy:       MERC_MAX / yMax,
+    _tPipeline: undefined,
+    _Sx:       S,
+    _Sy:       S,
     _Ox:       0,
     _Oy:       0,
     sourceCRS: crsString,
@@ -437,9 +507,32 @@ export async function transformCoordsF64(
   coords: Float64Array,
   transformer: Transformer,
 ): Promise<Float64Array> {
-  const { _tFwd, _tInvMerc, _Sx, _Sy, _Ox, _Oy } = transformer;
   const n = coords.length / 4;
   if (n === 0) return new Float64Array(0);
+
+  if (transformer._tPipeline) {
+    const enabled = __DEV__ && profiling.enabled;
+    let t0 = 0;
+    if (__DEV__ && enabled) t0 = performance.now();
+
+    const buf = await proj.coordArray(n);
+    const f64: Float64Array = (buf as any).buffer;
+    f64.set(coords);
+    // Zero z/t slots — WASM heap uses malloc not calloc, and callers of the
+    // exported transformCoordsF64 may pass non-zero z/t values.
+    for (let i = 0; i < n; i++) { f64[i * 4 + 2] = 0; f64[i * 4 + 3] = 0; }
+    await proj.projTransArray({ p: transformer._tPipeline, direction: 1, n, coord: buf });
+
+    if (__DEV__ && enabled) {
+      console.debug(
+        `[backproj:transformCoordsF64] n=${n} pipeline=${tcFmtMs(performance.now() - t0)}`,
+      );
+    }
+
+    return new Float64Array(f64);
+  }
+
+  const { _tFwd, _tInvMerc, _Sx, _Sy, _Ox, _Oy } = transformer;
 
   const enabled = __DEV__ && profiling.enabled;
   let tAlloc = 0, tTrans1 = 0, tAffine = 0, tTrans2 = 0;
@@ -485,6 +578,57 @@ function tcFmtMs(ms: number): string {
 }
 
 /**
+ * Extract the coordoperation PROJ string from a CRS-to-CRS transform.
+ * Returns the conversion pipeline (without datum shift) and the
+ * coordoperation as a usable PJ for affine computation.
+ *
+ * Returns null for CRS types where coordoperation extraction doesn't apply,
+ * e.g. compound CRS (EPSG:7415 = Amersfoort/RD New + NAP height). PROJ logs
+ * "Object is not a DerivedCRS or BoundCRS" to stderr in this case — harmless,
+ * only during buildTransformer init, not the hot path.
+ */
+async function getCoordoperationInfo(
+  tFwd: PJ,
+): Promise<{ convStr: string; convPJ: PJ } | null> {
+  try {
+    const targetCrs = await proj.projGetTargetCrs({ pj: tFwd });
+    const coordOp = await proj.projCrsGetCoordoperation({ crs: targetCrs });
+    const convStr: string = await proj.projAsProjString({ pj: coordOp, type: 0 });
+    if (!convStr) return null;
+    // Create a usable PJ from the coordoperation string (with axisswap stripped
+    // since our input is lon/lat, not EPSG's lat/lon).
+    const stripped = convStr
+      .replace(/\+step\s+\+proj=axisswap\s+\+order=2,1\s+/, '');
+    const convPJ = await proj.projCreate({ definition: stripped });
+    if (!convPJ) return null;
+    return { convStr, convPJ };
+  } catch {
+    return null;
+  }
+}
+
+function buildPipelineString(
+  convStr: string, Sx: number, Sy: number, Ox: number, Oy: number,
+): string {
+  const inner = convStr
+    .replace(/^\+proj=pipeline\s+/, '')
+    .replace(/\+step\s+\+proj=axisswap\s+\+order=2,1\s+/, '');
+  // THREE PROJ API TRAPS (each silently produces wrong output, not errors):
+  //
+  // 1. Affine offsets: +xoff/+yoff, NOT +x0/+y0. Wrong names are silently
+  //    ignored, producing scale-only output with no translation.
+  //
+  // 2. Spherical Mercator: +a=6378137 +b=6378137, NOT the CRS's +ellps.
+  //    The affine maps into EPSG:3857 (Web Mercator) metre space, which uses
+  //    a spherical formulation. Using the coordoperation's ellipsoid here
+  //    applies ellipsoidal inverse Mercator — subtly wrong fake coordinates.
+  //
+  // 3. Radians to degrees: +inv +proj=merc outputs radians. Must append
+  //    +proj=unitconvert +xy_in=rad +xy_out=deg or output is ~57x too small.
+  return `+proj=pipeline ${inner} +step +proj=affine +s11=${Sx} +s22=${Sy} +xoff=${Ox} +yoff=${Oy} +step +inv +proj=merc +a=6378137 +b=6378137 +step +proj=unitconvert +xy_in=rad +xy_out=deg`;
+}
+
+/**
  * Inverse of transformCoords: given fake [lon, lat] produced by the pipeline,
  * recover the original real [lon, lat].
  *
@@ -500,9 +644,22 @@ export async function inverseTransformCoords(
   fakeCoords: [number, number][],
   transformer: Transformer,
 ): Promise<[number, number][]> {
-  const { _tFwd, _tInvMerc, _Sx, _Sy, _Ox, _Oy } = transformer;
   const n = fakeCoords.length;
   if (n === 0) return [];
+
+  if (transformer._tPipeline) {
+    const buf = await proj.coordArray(n);
+    await proj.setCoords(buf, fakeCoords.map(([lon, lat]) => [lon, lat, 0, 0]));
+    await proj.projTransArray({ p: transformer._tPipeline, direction: -1, n, coord: buf });
+    const f64: Float64Array = (buf as any).buffer;
+    const result: [number, number][] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      result[i] = [f64[i * 4], f64[i * 4 + 1]];
+    }
+    return result;
+  }
+
+  const { _tFwd, _tInvMerc, _Sx, _Sy, _Ox, _Oy } = transformer;
 
   const mercBuf = await proj.coordArray(n);
   await proj.setCoords(mercBuf, fakeCoords.map(([lon, lat]) => [lon, lat, 0, 0]));
@@ -552,26 +709,26 @@ export async function transformPoint(
  * Compute the fake bounding box for use with map.fitBounds().
  *
  * If the CRS has a known area of use (from the PROJ database), transforms
- * those geographic bounds through the pipeline for a tight fit. Otherwise
- * falls back to the full Mercator world bounds.
+ * those geographic bounds through the pipeline for a tight fit. For global
+ * CRS without area of use, transforms world corners to get the actual
+ * fake extent (which may be smaller than ±85° with uniform scale).
  */
 export async function getWorldBounds(
   transformer: Transformer,
 ): Promise<[[number, number], [number, number]]> {
   const aou = transformer._areaOfUse;
-  if (aou) {
-    const padLon = (aou.east - aou.west) * 0.2;
-    const padLat = (aou.north - aou.south) * 0.2;
-    const corners = await transformCoords(
-      [
-        [Math.max(-180, aou.west - padLon), Math.max(-89.999999, aou.south - padLat)],
-        [Math.min(180, aou.east + padLon), Math.min(89.999999, aou.north + padLat)],
-      ],
-      transformer,
-    );
-    if (corners.every(([lon, lat]) => isFinite(lon) && isFinite(lat))) {
-      return [corners[0], corners[1]];
-    }
+  const sw = aou
+    ? [Math.max(-180, aou.west - (aou.east - aou.west) * WORLD_BOUNDS_PADDING),
+       Math.max(-89.999999, aou.south - (aou.north - aou.south) * WORLD_BOUNDS_PADDING)] as [number, number]
+    : [-180, -89.999999] as [number, number];
+  const ne = aou
+    ? [Math.min(180, aou.east + (aou.east - aou.west) * WORLD_BOUNDS_PADDING),
+       Math.min(89.999999, aou.north + (aou.north - aou.south) * WORLD_BOUNDS_PADDING)] as [number, number]
+    : [180, 89.999999] as [number, number];
+
+  const corners = await transformCoords([sw, ne], transformer);
+  if (corners.every(([lon, lat]) => isFinite(lon) && isFinite(lat))) {
+    return [corners[0], corners[1]];
   }
-  return [[-180, -85.051129], [180, 85.051129]];
+  return [[-180, -MAX_MERC_LAT], [180, MAX_MERC_LAT]];
 }

@@ -7,6 +7,7 @@ export {
   inverseTransformCoords,
   inverseTransformPoint,
   getWorldBounds,
+  MAX_MERC_LAT,
 } from './proj.js';
 export type { Transformer } from './proj.js';
 export { reprojectGeoJSON } from './geojson.js';

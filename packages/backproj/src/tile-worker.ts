@@ -135,21 +135,23 @@ function handlePhase1(msg: {
     for (const [layerName, features] of Object.entries(groups)) {
       for (const [featureId, fragments] of Object.entries(features)) {
         try {
-          const result = processFeaturePhase1(fragments, wts, msg.outputZ, acc);
-          if (result) {
-            const flat = new Float64Array(result.coords.length * 4);
-            for (let i = 0; i < result.coords.length; i++) {
-              const off = i * 4;
-              flat[off] = result.coords[i][0];
-              flat[off + 1] = result.coords[i][1];
+          const results = processFeaturePhase1(fragments, wts, msg.outputZ, acc);
+          if (results) {
+            for (const result of results) {
+              const flat = new Float64Array(result.coords.length * 4);
+              for (let i = 0; i < result.coords.length; i++) {
+                const off = i * 4;
+                flat[off] = result.coords[i][0];
+                flat[off + 1] = result.coords[i][1];
+              }
+              coordArrays.push(flat);
+              geoms.push(result.geom);
+              featureKeys.push({
+                layerName,
+                featureId,
+                properties: fragments[0].properties || {},
+              });
             }
-            coordArrays.push(flat);
-            geoms.push(result.geom);
-            featureKeys.push({
-              layerName,
-              featureId,
-              properties: fragments[0].properties || {},
-            });
           }
         } catch {
           // wasmts can throw non-Error objects (GraalVM Proxy);

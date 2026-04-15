@@ -1,3 +1,9 @@
 node_modules
 dist
 .DS_Store
+results/
+test-results/
+.clj-kondo/
+.lsp/
+.portal/
+*.allium

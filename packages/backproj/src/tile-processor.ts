@@ -49,7 +49,7 @@
  * appear in the DevTools Performance "Timings" lane when profiling is enabled.
  */
 import type { LRUCache } from 'lru-cache';
-import { Transformer, transformCoordsF64 } from './proj.js';
+import { Transformer, transformCoordsF64, MAX_MERC_LAT } from './proj.js';
 import {
   fakeBoundsForTile, outputTileToRealBounds, chooseInputZoom,
   enumerateInputTiles,
@@ -442,7 +442,6 @@ export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProce
       let debugInputLabels: { label: string; cx: number; cy: number }[] | undefined;
       if (debugConfig.labels) {
         const EDGE_PTS = 16;
-        const MAX_MERC_LAT = 85.051129;
         const allBoundaryPts: [number, number][] = [];
         const tilePtCounts: number[] = [];
         const tileCenters: [number, number][] = [];

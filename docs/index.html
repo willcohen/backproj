@@ -19,10 +19,10 @@
     "cherry-cljs/cljs.core.js": "https://cdn.jsdelivr.net/npm/cherry-cljs@0.5.33/lib/cljs.core.js",
     "cherry-cljs/lib/clojure.string.js": "https://cdn.jsdelivr.net/npm/cherry-cljs@0.5.33/lib/clojure.string.js",
     "resource-tracker": "https://cdn.jsdelivr.net/npm/resource-tracker@0.0.1-alpha1/resource.mjs",
-    "proj-wasm": "https://cdn.jsdelivr.net/npm/proj-wasm@0.1.0-alpha7/dist/proj.mjs",
+    "proj-wasm": "https://cdn.jsdelivr.net/npm/proj-wasm@0.1.0-alpha8/dist/proj.mjs",
     "maplibre-gl": "https://esm.sh/maplibre-gl@5.20.0?bundle-deps",
-    "backproj": "https://cdn.jsdelivr.net/npm/backproj@0.0.3/dist/backproj.mjs",
-    "maplibre-proj": "https://cdn.jsdelivr.net/npm/maplibre-proj@0.0.3/dist/maplibre-proj.mjs",
+    "backproj": "https://cdn.jsdelivr.net/npm/backproj@0.0.4/dist/backproj.mjs",
+    "maplibre-proj": "https://cdn.jsdelivr.net/npm/maplibre-proj@0.0.4/dist/maplibre-proj.mjs",
     "lru-cache": "https://cdn.jsdelivr.net/npm/lru-cache@11.2.6/dist/esm/index.js",
     "pbf": "https://esm.sh/pbf@4.0.1",
     "@mapbox/vector-tile": "https://esm.sh/@mapbox/vector-tile@2.0.3",
@@ -443,7 +443,9 @@ summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #555; }
     </div>
   </div>
 
-  <!-- Profiling (hidden until debug() called from console) -->
+  <div style="margin-top:4px; text-align:right">
+    <a href="#" id="profiling-show" style="font-size:10px; color:#888; text-decoration:none">profiling</a>
+  </div>
   <div class="section" id="profiling-section" style="display:none">
     <label>Profiling</label>
     <div style="display:flex; align-items:center; gap:8px; margin-top:4px">
@@ -454,7 +456,7 @@ summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #555; }
       <button id="profiling-print">Print Summary</button>
       <button id="profiling-export">Export JSON</button>
       <button id="profiling-clear">Clear</button>
-      <button id="profiling-benchmark">Benchmark</button> <span style="font-size:10px;color:#888">EPSG:2249</span>
+      <button id="profiling-benchmark">Benchmark</button>
     </div>
     <div id="benchmark-status" style="display:none; margin-top:6px; font-size:11px; color:#1565c0; padding:6px 8px; background:#e3f2fd; border-radius:4px"></div>
   </div>
@@ -485,14 +487,36 @@ import { reprojectStyle } from 'maplibre-proj';
 import * as proj from 'proj-wasm';
 import { transformCoords, initProj, enableProfiling, disableProfiling, printProfilingSummary, exportProfilingJSON, clearProfilingData } from 'backproj';
 
-window.debug = () => {
+function showProfiling() {
   enableProfiling();
   document.getElementById('profiling-section').style.display = '';
   document.getElementById('profiling-toggle').checked = true;
-  console.log('Profiling enabled (effective only in dev builds).');
-};
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  params.set('profile', '1');
+  window.location.hash = params.toString();
+}
+
+window.debug = showProfiling;
+
+document.getElementById('profiling-show').addEventListener('click', (e) => {
+  e.preventDefault();
+  const section = document.getElementById('profiling-section');
+  if (section.style.display === 'none') {
+    showProfiling();
+  } else {
+    disableProfiling();
+    section.style.display = 'none';
+    document.getElementById('profiling-toggle').checked = false;
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    params.delete('profile');
+    window.location.hash = params.toString();
+  }
+});
 window.printProfilingSummary = printProfilingSummary;
 window.exportProfilingJSON = exportProfilingJSON;
+window.clearProfilingData = clearProfilingData;
+window.enableProfiling = enableProfiling;
+window.transformCoords = transformCoords;
 
 const DEFAULT_CRS = 'EPSG:5070';
 const NOMINATIM_RATE_LIMIT_MS = 1250;
@@ -707,6 +731,7 @@ async function updateMap(crsString, initialPos) {
 
     if (state.map) {
       state.map.setMaxBounds(null);
+      state.map.setMinZoom(0);
       state.map.setStyle(style);
       state.map.once('styledata', async () => {
         if (crsChanged) {
@@ -724,6 +749,7 @@ async function updateMap(crsString, initialPos) {
         style,
         projection: { type: 'mercator' },
         renderWorldCopies: false,
+        minZoom: 0,
       };
       if (maxBounds) mapOpts.maxBounds = maxBounds;
       if (initialPos) {
@@ -1094,7 +1120,7 @@ function filterCatalog(query) {
   const results = [];
   for (const e of state.projectedCRS) {
     if (e.deprecated) continue;
-    const id = `${e.auth_name}:${e.code}`.toLowerCase();
+    const id = `${e.authName}:${e.code}`.toLowerCase();
     const name = (e.name || '').toLowerCase();
     if (q && !id.includes(q) && !name.includes(q)) continue;
     results.push(e);
@@ -1110,7 +1136,7 @@ function renderDropdown() {
     const entry = filtered[i];
     const item = document.createElement('div');
     item.className = 'crs-dropdown-item' + (i === activeIdx ? ' active' : '');
-    const code = `${entry.auth_name}:${entry.code}`;
+    const code = `${entry.authName}:${entry.code}`;
     item.innerHTML = `<span class="crs-code">${escapeHtml(code)}</span><span class="crs-name">${escapeHtml(entry.name || '')}</span>`;
     item.addEventListener('mousedown', (e) => { e.preventDefault(); selectCRS(i); });
     crsDropdown.appendChild(item);
@@ -1125,7 +1151,7 @@ function renderDropdown() {
 function selectCRS(idx) {
   if (idx < 0 || idx >= filtered.length) return;
   const entry = filtered[idx];
-  const code = `${entry.auth_name}:${entry.code}`;
+  const code = `${entry.authName}:${entry.code}`;
   crsDropdown.style.display = 'none';
   crsSearchInput.value = '';
 
@@ -1207,11 +1233,11 @@ async function init() {
   await initProj();
 
   // Load CRS catalog (dedup: PROJ returns multiple rows per CRS when there are multiple usage entries)
-  const catalog = await proj.getCrsInfoListFromDatabase({ auth_name: '', types: [15] }); // 15 = PJ_TYPE_PROJECTED_CRS
+  const catalog = await proj.projGetCrsInfoListFromDatabase({ auth_name: '', types: [15] }); // 15 = PJ_TYPE_PROJECTED_CRS
   const seen = new Set();
   state.projectedCRS = catalog.filter(e => {
     if (e.deprecated) return false;
-    const key = `${e.auth_name}:${e.code}`;
+    const key = `${e.authName}:${e.code}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -1222,12 +1248,10 @@ async function init() {
   const dataMode = hash.data || 'mvt';
 
   if (hash.profile) {
-    enableProfiling();
-    document.getElementById('profiling-section').style.display = '';
-    document.getElementById('profiling-toggle').checked = true;
+    showProfiling();
   }
 
-  const initialEntry = state.projectedCRS.find(e => `${e.auth_name}:${e.code}` === initialCRS);
+  const initialEntry = state.projectedCRS.find(e => `${e.authName}:${e.code}` === initialCRS);
   crsChipCode.textContent = initialCRS;
   crsChipName.textContent = initialEntry ? (initialEntry.name || '') : '';
   crsChip.style.display = 'block';
@@ -1242,6 +1266,8 @@ async function init() {
     ? { center: [hash.x, hash.y], zoom: hash.z }
     : null;
   await updateMap(initialCRS, hashPos);
+
+  window.updateMap = updateMap;
 
   // Update hash on map move
   state.map.on('moveend', updateHash);
@@ -1331,7 +1357,6 @@ let benchmarkRunning = false;
 async function runBenchmark() {
   if (benchmarkRunning) return;
   benchmarkRunning = true;
-  const map = state.map;
   const statusEl = document.getElementById('benchmark-status');
   const btnEl = document.getElementById('profiling-benchmark');
   btnEl.disabled = true;
@@ -1343,65 +1368,51 @@ async function runBenchmark() {
   }
 
   function waitForIdle() {
-    return new Promise(r => map.once('idle', r));
+    return new Promise(r => state.map.once('idle', r));
   }
 
   try {
-    if (state.currentCRS !== 'EPSG:2249') {
-      setStatus('Switching to EPSG:2249...');
-      await updateMap('EPSG:2249');
+    const resp = await fetch('../tests/scenarios.json');
+    const scenarios = await resp.json();
+
+    for (const scenario of scenarios) {
+      setStatus(`Switching to ${scenario.crs}...`);
+      await updateMap(scenario.crs);
       await waitForIdle();
-    }
 
-    setStatus('Resetting viewport...');
-    clearProfilingData();
-    enableProfiling();
-    document.getElementById('profiling-toggle').checked = true;
+      clearProfilingData();
+      enableProfiling();
+      document.getElementById('profiling-toggle').checked = true;
 
-    map.fitBounds(state.lastBounds, { animate: false });
-    await waitForIdle();
+      state.map.fitBounds(state.lastBounds, { animate: false });
+      await waitForIdle();
 
-    // WGS84 -> fake Mercator via the full projection pipeline.
-    setStatus('Computing waypoints...');
-    const fakeCoords = await transformCoords([
-      [-71.058, 42.360],  // Downtown Boston
-      [-71.094, 42.360],  // Cambridge/MIT
-      [-71.040, 42.345],  // South Boston waterfront
-      [-71.081, 42.349],  // Back Bay
-      [-71.097, 42.347],  // Fenway
-    ], state.transformer);
-    const [boston, cambridge, southBoston, backBay, fenway] = fakeCoords;
+      setStatus(`${scenario.crs}: Computing waypoints...`);
+      const wgs84Points = scenario.waypoints.map(w => [w.lon, w.lat]);
+      const fakeCoords = await transformCoords(wgs84Points, state.transformer);
 
-    setStatus('Flight starting...');
+      setStatus(`${scenario.crs}: Flight starting...`);
+      const flightStart = performance.now();
 
-    // [lng, lat, zoom, durationMs, label]
-    const plan = [
-      [boston[0], boston[1], 10, 0, 'Jump to Boston z10'],
-      [boston[0], boston[1], 12, 2000, 'Zoom to z12'],
-      [cambridge[0], cambridge[1], 12, 3000, 'Pan to Cambridge'],
-      [southBoston[0], southBoston[1], 13, 3000, 'South Boston + zoom z13'],
-      [backBay[0], backBay[1], 13, 3000, 'Pan to Back Bay'],
-      [fenway[0], fenway[1], 12, 3000, 'Fenway + zoom z12'],
-      [boston[0], boston[1], 12, 2000, 'Return to Boston'],
-    ];
+      for (let i = 0; i < scenario.waypoints.length; i++) {
+        const wp = scenario.waypoints[i];
+        const [lng, lat] = fakeCoords[i];
+        setStatus(`${scenario.crs}: Waypoint ${i + 1}/${scenario.waypoints.length}: ${wp.label}`);
 
-    const flightStart = performance.now();
-
-    for (let i = 0; i < plan.length; i++) {
-      const [lng, lat, zoom, dur, label] = plan[i];
-      setStatus(`Waypoint ${i + 1}/${plan.length}: ${label}`);
-
-      if (dur === 0) {
-        map.jumpTo({ center: [lng, lat], zoom });
-      } else {
-        map.flyTo({ center: [lng, lat], zoom, duration: dur });
+        if (wp.durationMs === 0) {
+          state.map.jumpTo({ center: [lng, lat], zoom: wp.zoom });
+        } else {
+          state.map.flyTo({ center: [lng, lat], zoom: wp.zoom, duration: wp.durationMs });
+        }
+        await waitForIdle();
       }
-      await waitForIdle();
+
+      const flightMs = performance.now() - flightStart;
+      setStatus(`${scenario.crs}: Flight complete in ${Math.round(flightMs)}ms`);
+      printProfilingSummary();
     }
 
-    const flightMs = performance.now() - flightStart;
-    setStatus(`Flight complete in ${Math.round(flightMs)}ms. See console for profiling.`);
-    printProfilingSummary();
+    setStatus('All scenarios complete. See console for profiling.');
 
   } catch (err) {
     setStatus(`Benchmark error: ${err.message}`);
@@ -1430,7 +1441,7 @@ document.getElementById('reset-defaults').addEventListener('click', async () => 
   state.currentCRS = null;
   state.baseStyle = null;
   state.baseStyleUrl = null;
-  const entry = state.projectedCRS.find(e => `${e.auth_name}:${e.code}` === DEFAULT_CRS);
+  const entry = state.projectedCRS.find(e => `${e.authName}:${e.code}` === DEFAULT_CRS);
   crsChipCode.textContent = DEFAULT_CRS;
   crsChipName.textContent = entry ? (entry.name || '') : '';
   await updateMap(DEFAULT_CRS);

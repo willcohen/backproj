@@ -1,11 +1,19 @@
 {
   "name": "backproj-monorepo",
   "private": true,
-  "workspaces": ["packages/*"],
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "npm run build --workspaces",
     "build:dev": "npm run build:dev --workspace=packages/backproj && npm run build:dev --workspace=packages/maplibre-proj",
     "check": "npm run check --workspaces",
-    "serve": "npx http-server -p 8000 --cors"
+    "serve": "node tests/server.mjs",
+    "test": "node tests/proj-test.mjs",
+    "bench": "node tests/bench.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1"
   }
 }

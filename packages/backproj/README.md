@@ -4,9 +4,10 @@ Reproject geospatial data through any coordinate reference system in the
 browser, using [proj-wasm](https://www.npmjs.com/package/proj-wasm)
 (PROJ 9 compiled to WebAssembly).
 
-Supports GeoJSON reprojection and MVT (Mapbox Vector Tile) reprojection
-with a worker pool for performance. Framework-agnostic -- for MapLibre GL
-JS integration, see [maplibre-proj](../maplibre-proj/).
+Supports GeoJSON and vector tile reprojection with a worker pool for
+performance. Currently handles MVT (Mapbox Vector Tiles); MLT (MapLibre
+Tiles) support is pending. Framework-agnostic -- for MapLibre GL JS
+integration, see [maplibre-proj](../maplibre-proj/).
 
 ## Install
 
@@ -14,7 +15,7 @@ JS integration, see [maplibre-proj](../maplibre-proj/).
 npm install backproj
 ```
 
-For MVT reprojection, also install the geometry engine (peer dependency):
+For vector tile reprojection, also install the geometry engine (peer dependency):
 
 ```
 npm install @wcohen/wasmts
@@ -52,7 +53,7 @@ const results = await transformCoords(coordArray, transformer);
 const real = await inverseTransformCoords(fakeCoords, transformer);
 ```
 
-### MVT reprojection (with worker pool)
+### Vector tile reprojection (with worker pool)
 
 ```typescript
 import { initProj, buildTransformer, createTileProcessor, createTileCache } from 'backproj';
@@ -69,13 +70,16 @@ const pbf = await processor.reprojectTile(z, x, y, transformer, fetchTile, cache
 
 `buildTransformer()` accepts any CRS string that PROJ understands:
 
-- EPSG codes: `'EPSG:5070'`, `'EPSG:3857'`, `'EPSG:32632'`
+- EPSG codes: `'EPSG:5070'`, `'EPSG:2249'`, `'EPSG:32632'`
 - ESRI codes: `'ESRI:54030'` (Robinson), `'ESRI:54009'` (Mollweide)
 - PROJ strings: `'+proj=robin +lon_0=0 +datum=WGS84 +units=m'`
 - WKT2, WKT1-GDAL, ESRI WKT
 - PROJJSON
 
-Geographic CRS (e.g. `EPSG:4326`) and interrupted projections are rejected.
+Both regional CRS (state plane, UTM, national grids) and global projections
+(Robinson, Mollweide, Eckert IV) are supported. Geographic CRS (e.g. `EPSG:4326`)
+are rejected. Interrupted projections (e.g. Goode Homolosine) are not rejected
+but will produce visual artifacts.
 
 ## Public API
 
@@ -98,7 +102,7 @@ Geographic CRS (e.g. `EPSG:4326`) and interrupted projections are rejected.
 |---|---|
 | `reprojectGeoJSON(fc, t)` | Reproject a FeatureCollection. Returns a deep copy. |
 
-### MVT worker pool (`tile-processor.ts`)
+### Vector tile worker pool (`tile-processor.ts`)
 
 | Export | Description |
 |---|---|
@@ -113,7 +117,7 @@ Geographic CRS (e.g. `EPSG:4326`) and interrupted projections are rejected.
 | `outputTileToRealBounds(z, x, y, t)` | Output tile -> real WGS84 bbox. |
 | `chooseInputZoom(z, realBounds)` | Select input zoom level. |
 | `enumerateInputTiles(bounds, z)` | Real bbox -> list of Mercator tiles. |
-| `tileLocalToLonLat(tileX, tileY, z, tx, ty)` | MVT tile-local integers -> real lon/lat. |
+| `tileLocalToLonLat(tileX, tileY, z, tx, ty)` | Tile-local integers -> real lon/lat. |
 
 ### Profiling (`profiling.ts`)
 
@@ -153,10 +157,11 @@ real lon/lat  ->  [target CRS]  ->  scale to Mercator range  ->  [inv Mercator] 
 ```
 
 The web map renderer draws the fake lon/lat in Mercator, which visually
-produces the target projection. This requires exactly 2 batch proj-wasm
-calls per coordinate array, plus O(n) JS arithmetic for the scaling step.
+produces the target projection. When the CRS coordoperation is available,
+all three steps collapse into a single PROJ pipeline (one WASM call).
+Falls back to 2 WASM calls + JS arithmetic for compound CRS.
 
-### MVT reprojection pipeline
+### Vector tile reprojection pipeline
 
 For each output tile `(z, x, y)` requested by the map renderer:
 

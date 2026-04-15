@@ -7,7 +7,13 @@ Display any map projection in a web map. Projection math powered by [proj-wasm](
 ## EARLY DEVELOPMENT
 
 This project is in its initial phases. APIs and package structure may
-change substantially. Currently supports GeoJSON and MVT reprojection.
+change substantially. Currently supports GeoJSON and vector tile
+reprojection for both regional CRS (state plane, UTM, national grids)
+and global projections (Robinson, Mollweide, Eckert IV, etc.). Vector
+tile support covers MVT (Mapbox Vector Tiles); MLT (MapLibre Tiles)
+support is pending.
+
+Interrupted projections (Goode Homolosine, etc.) are not yet supported.
 
 ## Packages
 
@@ -21,7 +27,7 @@ Projection-agnostic coordinate transformation. No map renderer dependency.
 npm install backproj
 ```
 
-Peer dependency: `@wcohen/wasmts` (>=0.1.0-alpha4, for MVT reprojection)
+Peer dependency: `@wcohen/wasmts` (>=0.1.0-alpha4, for vector tile reprojection)
 
 ```typescript
 import { initProj, buildTransformer, transformCoords, reprojectGeoJSON } from 'backproj';
@@ -46,7 +52,7 @@ const reprojected = await reprojectGeoJSON(featureCollection, transformer);
 | `transformPoint(coord, transformer)` | Single-point convenience wrapper. |
 | `getWorldBounds(transformer)` | Fake bounding box for `map.fitBounds()`. |
 | `reprojectGeoJSON(fc, transformer)` | Reproject a GeoJSON FeatureCollection. Returns a deep copy. |
-| `createTileProcessor(wasmtsUrl?)` | Create a worker pool for MVT reprojection. Requires `@wcohen/wasmts`. |
+| `createTileProcessor(wasmtsUrl?)` | Create a worker pool for vector tile reprojection. Requires `@wcohen/wasmts`. |
 | `createTileCache(opts?)` | LRU cache for fetched Mercator tile PBFs. |
 
 ### `maplibre-proj` — MapLibre GL JS integration
@@ -92,7 +98,12 @@ For each point:
 2. Scale from the projection's native extent into the Web Mercator extent
 3. Inverse-project through Mercator back to fake lon/lat
 
-Two batch WASM calls per coordinate array, plus O(n) JS arithmetic for the scaling step. This is an implementation of the ["dirty reprojectors"](https://medium.com/devseed/dirty-reprojectors-1df66e8f308d) technique originally described by [Development Seed](https://github.com/developmentseed/dirty-reprojectors) in 2016.
+When the CRS coordoperation is available, all three steps collapse into a single
+PROJ pipeline (`proj_create`), executing as one WASM call. Falls back to two WASM
+calls + JS arithmetic for compound CRS. This is an implementation of the
+["dirty reprojectors"](https://medium.com/devseed/dirty-reprojectors-1df66e8f308d)
+technique originally described by
+[Development Seed](https://github.com/developmentseed/dirty-reprojectors) in 2016.
 
 Real coordinates are replaced by fake WGS-84 values after warping. `map.project()` and popup positions operate in fake space. Globe mode must be off (Mercator rendering is used internally).
 
@@ -101,8 +112,10 @@ Real coordinates are replaced by fake WGS-84 values after warping. `map.project(
 Any CRS string that PROJ understands: EPSG codes, ESRI codes, PROJ strings, WKT2, WKT1, PROJJSON.
 
 Rejected inputs:
-- Geographic CRS (EPSG:4326, `+proj=longlat`) — detected and rejected at build time
-- Interrupted projections (e.g. Goode Homolosine with interruptions) — rejected when <10% of sampled points produce finite output
+- Geographic CRS (EPSG:4326, `+proj=longlat`) -- detected and rejected at build time
+
+Unsupported (not rejected, but will produce visual artifacts):
+- Interrupted projections (e.g. Goode Homolosine)
 
 ## Demo
 
@@ -121,9 +134,24 @@ npx serve .
 npm install
 npm run build --workspaces   # esbuild -> dist/ in each package
 npm run check --workspaces   # TypeScript type checking
+npm test                     # pipeline smoke test + integration test
 ```
 
 Build order matters: `backproj` must build before `maplibre-proj` (type dependency).
+
+### Benchmarking
+
+```bash
+BENCH_RESULTS_DIR=/tmp/bench npx playwright test tests/benchmark.spec.ts --reporter=list
+node tests/compare.mjs <baseline-dir> <candidate-dir>
+```
+
+### Dev server
+
+```bash
+node tests/server.mjs        # COEP/COOP server on :8973
+# open http://localhost:8973/#profile=1&crs=EPSG:2249&data=mvt
+```
 
 ## License
 

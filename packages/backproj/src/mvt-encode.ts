@@ -63,6 +63,7 @@ export function encodeTilePbf(
   debugInputLabels?: { label: string; cx: number; cy: number }[] | null,
   geojsonWriteAcc?: { ms: number } | null,
 ): ArrayBuffer {
+  const tm = buildTileMapping(fakeBounds);
   const gvtLayers: Record<string, GvtLayer> = {};
 
   for (const [layerName, features] of Object.entries(layers)) {
@@ -71,7 +72,7 @@ export function encodeTilePbf(
     for (const feature of features) {
       for (const geom of feature.geometries) {
         const gvtFeature = geomToGvtFeature(
-          geom, feature.properties, fakeBounds, wts, geojsonWriteAcc,
+          geom, feature.properties, tm, wts, geojsonWriteAcc,
         );
         if (gvtFeature) gvtFeatures.push(gvtFeature);
       }
@@ -118,7 +119,7 @@ export function encodeTilePbf(
     for (let i = 0; i < debugInputBounds.length; i++) {
       const ring = debugInputBounds[i];
       const tileRing = ring
-        .map(([lon, lat]) => lonLatToTile(lon, lat, fakeBounds))
+        .map(([lon, lat]) => lonLatToTile(lon, lat, tm))
         .filter(([x, y]) => x >= DBG_MIN && x <= DBG_MAX && y >= DBG_MIN && y <= DBG_MAX);
       if (tileRing.length >= 2) {
         inputFeatures.push({
@@ -136,7 +137,7 @@ export function encodeTilePbf(
   if (debugInputLabels && debugInputLabels.length > 0) {
     const labelFeatures: GvtFeature[] = [];
     for (const { label, cx, cy } of debugInputLabels) {
-      const [tx, ty] = lonLatToTile(cx, cy, fakeBounds);
+      const [tx, ty] = lonLatToTile(cx, cy, tm);
       if (tx >= DBG_MIN && tx <= DBG_MAX && ty >= DBG_MIN && ty <= DBG_MAX) {
         labelFeatures.push({
           geometry: [[tx, ty]],
@@ -163,7 +164,7 @@ export function encodeTilePbf(
 function geomToGvtFeature(
   geom: WasmGeometry,
   properties: Record<string, any>,
-  fakeBounds: { west: number; south: number; east: number; north: number },
+  tm: TileMapping,
   wts: typeof import('@wcohen/wasmts'),
   geojsonWriteAcc?: { ms: number } | null,
 ): GvtFeature | null {
@@ -176,7 +177,7 @@ function geomToGvtFeature(
   const type = gvtType(geojson.type);
   if (!type) return null;
 
-  const rings = coordsToTileLocal(geojson, fakeBounds);
+  const rings = coordsToTileLocal(geojson, tm);
   if (!rings || rings.length === 0) return null;
 
   return { geometry: rings, type, tags: properties };
@@ -198,42 +199,68 @@ function gvtType(geojsonType: string): 1 | 2 | 3 | null {
   }
 }
 
-function lonLatToTile(
-  lon: number, lat: number,
+// Mercator y for a latitude in degrees.  Same formula as the tile-grid
+// inverse in tiling.ts, just the forward direction.
+function latToMercY(latDeg: number): number {
+  return Math.log(Math.tan(Math.PI / 4 + (latDeg * Math.PI) / 360));
+}
+
+// Precomputed per-tile constants so lonLatToTile avoids redundant trig.
+interface TileMapping {
+  west: number;
+  invLonSpan: number;  // EXTENT / (east - west)
+  mercNorth: number;
+  invMercSpan: number; // EXTENT / (mercNorth - mercSouth)
+}
+
+function buildTileMapping(
   fakeBounds: { west: number; south: number; east: number; north: number },
+): TileMapping {
+  const mercNorth = latToMercY(fakeBounds.north);
+  const mercSouth = latToMercY(fakeBounds.south);
+  return {
+    west: fakeBounds.west,
+    invLonSpan: EXTENT / (fakeBounds.east - fakeBounds.west),
+    mercNorth,
+    invMercSpan: EXTENT / (mercNorth - mercSouth),
+  };
+}
+
+function lonLatToTile(
+  lon: number, lat: number, tm: TileMapping,
 ): [number, number] {
-  const x = Math.round((lon - fakeBounds.west) / (fakeBounds.east - fakeBounds.west) * EXTENT);
-  const y = Math.round((fakeBounds.north - lat) / (fakeBounds.north - fakeBounds.south) * EXTENT);
+  const x = Math.round((lon - tm.west) * tm.invLonSpan);
+  // MVT tile y is linear in Mercator y, not latitude.
+  const y = Math.round((tm.mercNorth - latToMercY(lat)) * tm.invMercSpan);
   return [x, y];
 }
 
 function coordsToTileLocal(
-  geojson: any,
-  fakeBounds: { west: number; south: number; east: number; north: number },
+  geojson: any, tm: TileMapping,
 ): number[][] | number[][][] | null {
   const t = geojson.type;
   const c = geojson.coordinates;
 
   if (t === 'Point') {
-    const [x, y] = lonLatToTile(c[0], c[1], fakeBounds);
+    const [x, y] = lonLatToTile(c[0], c[1], tm);
     return [[x, y]];
   }
   if (t === 'MultiPoint') {
     return c.map((p: number[]) => {
-      const [x, y] = lonLatToTile(p[0], p[1], fakeBounds);
+      const [x, y] = lonLatToTile(p[0], p[1], tm);
       return [x, y];
     });
   }
   if (t === 'LineString') {
     return [c.map((p: number[]) => {
-      const [x, y] = lonLatToTile(p[0], p[1], fakeBounds);
+      const [x, y] = lonLatToTile(p[0], p[1], tm);
       return [x, y];
     })];
   }
   if (t === 'MultiLineString') {
     return c.map((line: number[][]) =>
       line.map((p: number[]) => {
-        const [x, y] = lonLatToTile(p[0], p[1], fakeBounds);
+        const [x, y] = lonLatToTile(p[0], p[1], tm);
         return [x, y];
       })
     );
@@ -241,7 +268,7 @@ function coordsToTileLocal(
   if (t === 'Polygon') {
     const rings = c.map((ring: number[][]) =>
       ring.map((p: number[]) => {
-        const [x, y] = lonLatToTile(p[0], p[1], fakeBounds);
+        const [x, y] = lonLatToTile(p[0], p[1], tm);
         return [x, y];
       })
     );
@@ -252,7 +279,7 @@ function coordsToTileLocal(
     for (const poly of c) {
       const polyRings = poly.map((ring: number[][]) =>
         ring.map((p: number[]) => {
-          const [x, y] = lonLatToTile(p[0], p[1], fakeBounds);
+          const [x, y] = lonLatToTile(p[0], p[1], tm);
           return [x, y];
         })
       );

@@ -11,9 +11,9 @@
  *   enumerateInputTiles:     real bbox + zoom -> list of Mercator tile coords
  *   tileLocalToLonLat:       MVT tile-local integers -> real lon/lat
  */
-import { Transformer, inverseTransformCoords } from './proj.js';
+import { Transformer, inverseTransformCoords, MAX_MERC_LAT } from './proj.js';
 
-const MAX_MERC_LAT = 85.051129;
+const ZOOM_DROP_AREA_FACTOR = 4;
 
 export interface TileCoord {
   z: number;
@@ -80,7 +80,7 @@ export function chooseInputZoom(
   let z = outputZ;
   while (z > 0) {
     const tileSpan = 360 / (2 ** z);
-    if (lonSpan > tileSpan * 4 || latSpan > tileSpan * 4) {
+    if (lonSpan > tileSpan * ZOOM_DROP_AREA_FACTOR || latSpan > tileSpan * ZOOM_DROP_AREA_FACTOR) {
       z--;
     } else {
       break;

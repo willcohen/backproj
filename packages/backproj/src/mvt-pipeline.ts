@@ -32,13 +32,25 @@ export interface OutputFeature {
 }
 export type OutputLayers = Record<string, OutputFeature[]>;
 
+const DENSIFY_POINTS_PER_EDGE = 8;
+const DENSIFY_FLOOR = 0.01;
+const POINT_CLIP_BUFFER_RATIO = 0.10;
+const CLIP_INSIDE_TOLERANCE_RATIO = 0.01;
+
+// At low zoom, pre-clip features to geographic grid cells before reprojecting.
+// Prevents globe-spanning polygons from creating topologically broken geometry
+// after reprojection (e.g. antimeridian edges overlapping, polygon rings
+// wrapping around the projection boundary).
+const GEO_CLIP_MAX_ZOOM = 4;
+const GEO_CLIP_CELL_DEG = 90;
+
 // At zoom z, a Mercator tile edge spans 360/2^z degrees of longitude.
 // Without densification, straight edges in lon/lat become distorted arcs
-// in the target projection. The formula adds ~8 intermediate points per
-// tile edge: 360/(2^z * 8). This gives ~45 degrees at z0, ~5.6 at z2,
-// down to the 0.01-degree floor at z14+.
+// in the target projection. The formula adds ~DENSIFY_POINTS_PER_EDGE
+// intermediate points per tile edge. This gives ~45 degrees at z0, ~5.6
+// at z2, down to the DENSIFY_FLOOR at z14+.
 export function densifyTolerance(z: number): number {
-  return Math.max(0.01, 360 / (2 ** z * 8));
+  return Math.max(DENSIFY_FLOOR, 360 / (2 ** z * DENSIFY_POINTS_PER_EDGE));
 }
 
 export interface Phase1Accumulator {
@@ -85,7 +97,7 @@ export function createPhase2Accumulator(): Phase2Accumulator {
 export function processFeaturePhase1(
   fragments: GeoJSON.Feature[], wts: Wts, z: number,
   acc?: Phase1Accumulator | null,
-): { coords: [number, number][]; geom: WasmGeometry } | null {
+): { coords: [number, number][]; geom: WasmGeometry }[] | null {
   if (__DEV__ && acc) {
     acc.featureCount++;
     acc.fragmentCount += fragments.length;
@@ -122,39 +134,79 @@ export function processFeaturePhase1(
     if (__DEV__ && acc) acc.stitchMs += performance.now() - t;
   }
 
-  if (__DEV__ && acc) t = performance.now();
-  const tolerance = densifyTolerance(z);
-  const preCoords = wts.geom.getCoordinates(geom);
-  if (__DEV__ && acc) acc.preDensifyCoords += preCoords.length;
-  let maxEdge = 0;
-  for (let j = 1; j < preCoords.length; j++) {
-    const dx = preCoords[j].x - preCoords[j - 1].x;
-    const dy = preCoords[j].y - preCoords[j - 1].y;
-    const d = Math.abs(dx) > Math.abs(dy) ? Math.abs(dx) : Math.abs(dy);
-    if (d > maxEdge) maxEdge = d;
-    if (maxEdge >= tolerance) break;
-  }
-  const needsDensify = maxEdge >= tolerance;
-  if (needsDensify) {
-    geom = wts.densify.Densifier.densify(geom, tolerance);
-  }
-  if (__DEV__ && acc) acc.densifyMs += performance.now() - t;
-
-  if (__DEV__ && acc) t = performance.now();
-  let pairs: [number, number][];
-  if (!needsDensify) {
-    pairs = preCoords.map(c => [c.x, c.y] as [number, number]);
+  // At low zoom, clip to geographic grid cells so that no piece spans more
+  // than GEO_CLIP_CELL_DEG degrees. This prevents globe-spanning polygons
+  // from producing irrecoverably broken topology after reprojection.
+  let pieces: WasmGeometry[];
+  if (!isPoint && z <= GEO_CLIP_MAX_ZOOM) {
+    pieces = clipToGeoGrid(geom, wts);
   } else {
-    const coords = wts.geom.getCoordinates(geom);
-    pairs = coords.map(c => [c.x, c.y] as [number, number]);
-  }
-  if (__DEV__ && acc) {
-    acc.coordExtractMs += performance.now() - t;
-    acc.coordsProduced += pairs.length;
-    acc.postDensifyCoords += pairs.length;
+    pieces = [geom];
   }
 
-  return { coords: pairs, geom };
+  const results: { coords: [number, number][]; geom: WasmGeometry }[] = [];
+  const tolerance = densifyTolerance(z);
+
+  for (const piece of pieces) {
+    if (wts.geom.isEmpty(piece)) continue;
+
+    if (__DEV__ && acc) t = performance.now();
+    const preCoords = wts.geom.getCoordinates(piece);
+    if (__DEV__ && acc) acc.preDensifyCoords += preCoords.length;
+    let maxEdge = 0;
+    for (let j = 1; j < preCoords.length; j++) {
+      const dx = preCoords[j].x - preCoords[j - 1].x;
+      const dy = preCoords[j].y - preCoords[j - 1].y;
+      const d = Math.abs(dx) > Math.abs(dy) ? Math.abs(dx) : Math.abs(dy);
+      if (d > maxEdge) maxEdge = d;
+      if (maxEdge >= tolerance) break;
+    }
+    const needsDensify = maxEdge >= tolerance;
+    let densified = piece;
+    if (needsDensify) {
+      densified = wts.densify.Densifier.densify(piece, tolerance);
+    }
+    if (__DEV__ && acc) acc.densifyMs += performance.now() - t;
+
+    if (__DEV__ && acc) t = performance.now();
+    let pairs: [number, number][];
+    if (!needsDensify) {
+      pairs = preCoords.map(c => [c.x, c.y] as [number, number]);
+    } else {
+      const coords = wts.geom.getCoordinates(densified);
+      pairs = coords.map(c => [c.x, c.y] as [number, number]);
+    }
+    if (__DEV__ && acc) {
+      acc.coordExtractMs += performance.now() - t;
+      acc.coordsProduced += pairs.length;
+      acc.postDensifyCoords += pairs.length;
+    }
+
+    results.push({ coords: pairs, geom: densified });
+  }
+
+  return results.length > 0 ? results : null;
+}
+
+function clipToGeoGrid(geom: WasmGeometry, wts: Wts): WasmGeometry[] {
+  const cell = GEO_CLIP_CELL_DEG;
+  const results: WasmGeometry[] = [];
+  for (let lon = -180; lon < 180; lon += cell) {
+    for (let lat = -90; lat < 90; lat += cell) {
+      const clipEnv = wts.geom.toGeometry(
+        wts.geom.createEnvelope(lon, lon + cell, Math.max(lat, -90), Math.min(lat + cell, 90)),
+      );
+      try {
+        const clipped = wts.geom.intersection(geom, clipEnv);
+        if (!wts.geom.isEmpty(clipped)) {
+          results.push(clipped);
+        }
+      } catch {
+        // intersection can throw on degenerate geometry; skip cell
+      }
+    }
+  }
+  return results;
 }
 
 export function processFeaturePhase2(
@@ -179,7 +231,7 @@ export function processFeaturePhase2(
     if (y > maxY) maxY = y;
   }
   const isPoint = (minX === maxX && minY === maxY);
-  const buf = isPoint ? (clipMaxX - clipMinX) * 0.1 : 0;
+  const buf = isPoint ? (clipMaxX - clipMinX) * POINT_CLIP_BUFFER_RATIO : 0;
   if (maxX < clipMinX - buf || minX > clipMaxX + buf ||
       maxY < clipMinY - buf || minY > clipMaxY + buf) {
     if (__DEV__ && acc) acc.clipEmptyCount++;
@@ -210,7 +262,7 @@ export function processFeaturePhase2(
   } else {
     const clipW = clipMaxX - clipMinX;
     const clipH = clipMaxY - clipMinY;
-    const clipBuf = Math.min(clipW, clipH) * 0.01;
+    const clipBuf = Math.min(clipW, clipH) * CLIP_INSIDE_TOLERANCE_RATIO;
     const fullyInside = minX >= clipMinX - clipBuf && maxX <= clipMaxX + clipBuf &&
                         minY >= clipMinY - clipBuf && maxY <= clipMaxY + clipBuf;
 

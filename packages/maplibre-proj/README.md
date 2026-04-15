@@ -2,7 +2,7 @@
 
 Display [MapLibre GL JS](https://maplibre.org/) maps in any coordinate
 reference system. Wraps [backproj](../backproj/) to handle GeoJSON
-reprojection and MVT tile reprojection via protocol handlers.
+reprojection and vector tile reprojection via protocol handlers.
 
 ## Install
 
@@ -10,7 +10,7 @@ reprojection and MVT tile reprojection via protocol handlers.
 npm install maplibre-proj maplibre-gl
 ```
 
-For MVT reprojection (vector tile sources), also install the geometry engine (peer dependency):
+For vector tile reprojection, also install the geometry engine (peer dependency):
 
 ```
 npm install @wcohen/wasmts
@@ -61,14 +61,14 @@ const { style, bounds, transformer } = await reprojectStyle({
 });
 ```
 
-### MVT vector tiles
+### Vector tiles
 
 Vector tile sources in the style are automatically handled. The source's
 tile URLs are rewritten to a custom protocol handler that:
 
 1. Intercepts MapLibre's tile requests
 2. Fetches the necessary input Mercator tiles
-3. Runs them through backproj's MVT reprojection pipeline (worker pool)
+3. Runs them through backproj's vector tile reprojection pipeline (worker pool)
 4. Returns reprojected PBF data
 
 This requires `@wcohen/wasmts` to be loadable at runtime. Either:
@@ -147,6 +147,9 @@ There are two cache layers:
   `inverseTransformCoords` from backproj to recover real coordinates.
 - **Geographic CRS** (e.g. EPSG:4326) and **interrupted projections**
   (e.g. Goode Homolosine) are not supported.
+- Both regional CRS (state plane, UTM) and global projections (Robinson,
+  Mollweide, Eckert IV) work. Global projections use uniform affine scale
+  to preserve aspect ratio.
 
 ## License
 
