@@ -13,9 +13,11 @@
  *
  * GLOBAL vs REGIONAL CRS (the zoom alignment problem)
  *
- * For global projections (Robinson, Mollweide, etc.), step 2 uses scale-only:
- *   Sx = MERC_MAX / xMax, Sy = MERC_MAX / yMax, Ox = Oy = 0
- * This maps the full projection extent to the full Mercator world (+-20037508m).
+ * For global projections (Robinson, Mollweide, etc.), step 2 uses uniform
+ * scale-only:
+ *   S = MERC_MAX / max(xMax, yMax), Sx = Sy = S, Ox = Oy = 0
+ * Uniform scale preserves aspect ratio. This maps the full projection
+ * extent to the full Mercator world (+-20037508m).
  *
  * For regional projections (state plane, UTM, national grids), the old
  * scale-only approach compressed the region into a tiny fraction of the
@@ -126,8 +128,13 @@ type PJ = object;
  * A compiled transformer. Returned by buildTransformer.
  * Pass to transformCoords / inverseTransformCoords to reproject coordinates.
  *
- * The affine step between the two WASM calls is: x * Sx + Ox, y * Sy + Oy.
- * For global CRS: Ox = Oy = 0, Sx/Sy map full projection extent to +-MERC_MAX.
+ * The affine parameters (Sx, Sy, Ox, Oy) bridge projected metres and Mercator
+ * metres: x_merc = x_proj * Sx + Ox, y_merc = y_proj * Sy + Oy.
+ * When _tPipeline is available, the affine is embedded in the PROJ pipeline
+ * string and all three steps execute in a single WASM call. Otherwise the
+ * two-call fallback applies the affine in JS between tFwd and tInvMerc.
+ *
+ * For global CRS: Ox = Oy = 0, Sx = Sy (uniform scale, preserves aspect ratio).
  * For regional CRS: Sx/Sy match the area-of-use extent to its Mercator equivalent,
  * and Ox/Oy shift the center so output tiles align with input tiles at the same
  * zoom level (see module preamble for the zoom alignment problem).
@@ -192,7 +199,7 @@ async function getSharedInvMerc(): Promise<PJ> {
  * Samples a 33x33 grid of lon/lat through tFwd to find the maximum x and y
  * extents. Throws if both xMax and yMax are zero.
  *
- * Used only for global-mode CRS to compute Sx = MERC_MAX / xMax. For regional
+ * Used only for global-mode CRS to compute S = MERC_MAX / max(xMax, yMax). For regional
  * CRS, the affine parameters are computed directly from area-of-use edges
  * (see buildTransformer), so this function is not called.
  *
@@ -488,17 +495,19 @@ export async function transformCoords(
 }
 
 /**
- * Transform coordinates in stride-4 Float64Array layout through the pipeline.
+ * Transform coordinates in stride-4 Float64Array layout.
  * This is the sole transform engine -- transformCoords delegates here.
  *
- * Pipeline:
+ * Primary path (pipeline available): single projTransArray call through
+ * _tPipeline, which encapsulates forward + affine + inverse Mercator.
+ *
+ * Fallback path (no pipeline, e.g. compound CRS):
  *   lon/lat -> tFwd (WASM) -> proj_x, proj_y
  *   -> affine: x * Sx + Ox, y * Sy + Oy  (JS, produces Mercator metres)
  *   -> tInvMerc (WASM) -> fake lon/lat
- *
- * Uses exactly 2 batch WASM calls (projTransArray) regardless of array size.
- * Between passes, reads/writes the coord-array's underlying Float64Array
- * buffer directly (4 values per coord: x,y,z,t) to apply the affine.
+ * Uses 2 batch WASM calls with JS affine between them. Reads/writes the
+ * coord-array's underlying Float64Array buffer directly (4 values per
+ * coord: x,y,z,t) to apply the affine.
  *
  * PERF: DO NOT replace direct buffer access with proj.getCoords() calls.
  * getCoords sends a postMessage round-trip per coordinate per call.
@@ -632,7 +641,10 @@ function buildPipelineString(
  * Inverse of transformCoords: given fake [lon, lat] produced by the pipeline,
  * recover the original real [lon, lat].
  *
- * Pipeline (exact reverse of transformCoords):
+ * Primary path (pipeline available): single projTransArray call with
+ * direction=-1 through _tPipeline.
+ *
+ * Fallback path (exact reverse of the forward fallback):
  *   fake lon/lat -> Merc metres (tInvMerc, direction -1)
  *   -> inverse affine: (merc_x - Ox) / Sx, (merc_y - Oy) / Sy
  *   -> real lon/lat (tFwd, direction -1)
