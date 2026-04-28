@@ -1,5 +1,40 @@
 # Change Log
 
+## [0.0.5] - 2026-08-26
+
+### Added
+- Bench capture / replay. `npm run bench` writes a pinned fixture,
+  `npm run bench:replay` replays it offline. Capture taps exported
+  from `backproj`, off by default
+
+### Changed
+- **Breaking.** One worker pool hosts the wasmts and proj handlers,
+  and a tile's phase1, transform, and phase2 run on that worker as one
+  fused call. `backproj/tile-worker` is replaced by
+  `backproj/wasmts-handler`, and `TileProcessor.cleanupRequest` is
+  gone
+- **Breaking.** `@wcohen/wasmts` moves from a peer dependency to a
+  dependency (`^0.1.0-alpha6`). Flat construction replaces the GeoJSON
+  text round trips
+- `proj-wasm` `^0.1.0-alpha9`. New dependencies `ffi-wasm` and
+  worker-router
+- `createTileProcessor` accepts an options map
+  (`{wasmtsUrl?, poolSize?}`), and `reprojectTile` an optional
+  `outputRequestId`
+- `shutdown()` and `shutdownTileWorkers()` return a promise that
+  resolves when teardown completes
+- `createTileProcessor` initializes proj-wasm onto the joint pool:
+  create the processor first, build transformers after, and skip
+  `initProj`. A bare `initProj()` first is detected and re-initialized
+  onto the pool; transformers built before the processor must be
+  rebuilt
+- Each worker keeps a small LRU of decoded input tiles
+
+### Removed
+- The COI service worker and its README license note. proj-wasm
+  0.1.0-alpha9 is single-threaded, so the demo needs no isolation
+  headers
+
 ## [0.0.4] - 2026-04-15
 
 ### Added
@@ -75,6 +110,7 @@
   - Default layers: Natural Earth 110m land, graticules, and countries
   - coi-serviceworker for SharedArrayBuffer on static hosting
 
+[0.0.5]: https://github.com/willcohen/backproj/compare/0.0.4...0.0.5
 [0.0.4]: https://github.com/willcohen/backproj/compare/0.0.3...0.0.4
 [0.0.3]: https://github.com/willcohen/backproj/compare/0.0.2...0.0.3
 [0.0.2]: https://github.com/willcohen/backproj/compare/0.0.1...0.0.2

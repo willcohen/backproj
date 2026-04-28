@@ -44,3 +44,18 @@ export type {
   Phase2Detail,
   WorkerProfile,
 } from './profiling.js';
+export {
+  enableCapture,
+  disableCapture,
+  clearCapture,
+  isCaptureEnabled,
+  recordInputRequest,
+  recordOutputRequest,
+  recordTileBytes,
+  exportCapture,
+} from './capture.js';
+export type {
+  RequestLogEntry,
+  OutputTileRequest,
+  CaptureSnapshot,
+} from './capture.js';

@@ -1,7 +1,7 @@
 /**
  * mvt-pipeline.ts — Per-feature geometry processing for MVT reprojection.
  *
- * Implements the two-phase feature pipeline used by tile-worker.ts:
+ * Implements the two-phase feature pipeline used by wasmts-handler.ts:
  *
  *   Phase 1 (processFeaturePhase1):
  *     fragments -> stitch (CoverageUnion) -> adaptive densify -> extract coords
@@ -11,17 +11,20 @@
  *   Phase 2 (processFeaturePhase2):
  *     bbox disjoint check -> apply transformed coords -> repair -> bbox inside
  *     check / clip -> snap to grid
- *     Input: the retained Geometry + transformed [lon, lat][] from proj-wasm.
+ *     Input: the retained Geometry + a transformed Float64Array from proj-wasm,
+ *     packed at valuesPerCoord stride.
  *     Output: array of clipped, snapped Geometries ready for MVT encoding.
  *
  * Densification tolerance is zoom-dependent: coarser at low zoom (where tile
  * edges span many degrees) and finer at high zoom.
  *
  * All wasmts operations are synchronous. The async coord transformation
- * (proj-wasm) happens on the main thread between the two phases.
+ * (proj-wasm) runs between the two phases on the same joint-pool worker that
+ * holds the retained Geometry, since neither the Geometry handle nor the PROJ
+ * context can cross a postMessage. See tile-processor.ts.
  */
 import type { Geometry as WasmGeometry } from '@wcohen/wasmts';
-type Wts = typeof import('@wcohen/wasmts');
+type Wts = typeof wasmts;
 
 export type FetchTileFn = (z: number, x: number, y: number) => Promise<ArrayBuffer>;
 
@@ -61,7 +64,7 @@ export interface Phase1Accumulator {
   densifyMs: number;
   coordExtractMs: number;
   coordsProduced: number;
-  geojsonReadMs: number;
+  constructMs: number;
   preDensifyCoords: number;
   postDensifyCoords: number;
 }
@@ -71,7 +74,7 @@ export function createPhase1Accumulator(): Phase1Accumulator {
     featureCount: 0, fragmentCount: 0,
     stitchMs: 0, stitchCount: 0,
     densifyMs: 0, coordExtractMs: 0, coordsProduced: 0,
-    geojsonReadMs: 0,
+    constructMs: 0,
     preDensifyCoords: 0, postDensifyCoords: 0,
   };
 }
@@ -92,8 +95,83 @@ export function createPhase2Accumulator(): Phase2Accumulator {
   return { applyMs: 0, isValidMs: 0, fixRepairMs: 0, fixRepairCount: 0, clipMs: 0, clipEmptyCount: 0, skipClipCount: 0, precisionMs: 0, geojsonWriteMs: 0 };
 }
 
+interface FlatGeometry {
+  type: string;
+  coords: Float64Array;
+  ringOffsets: Int32Array | null;
+  partOffsets: Int32Array | null;
+}
+
+// Walk toGeoJSON's nested coordinate arrays straight into typed arrays for
+// wasmts.geom.fromFlat, skipping JSON entirely. The win is on the Java
+// side: GeoJsonReader.read is one string crossing, but it parses JSON *text* --
+// ~94% of that path's cost at 1k coords. stringify is only ~6%.
+//
+// Two facts from @mapbox/vector-tile that this relies on, both verified in its
+// source rather than assumed: loadGeometry already closes rings (the ClosePath
+// command pushes line[0].clone()), so no closure fixup is needed; and
+// classifyRings emits shell-first/holes-after per polygon, which is exactly
+// JTS's createPolygon(shell, holes) contract, so its grouping feeds
+// partOffsets/ringOffsets directly.
+//
+// ringOffsets indexes coords in coordinate units; partOffsets indexes
+// ringOffsets. Both carry a trailing end entry.
+function flattenGeoJSON(geometry: any): FlatGeometry {
+  const type: string = geometry.type;
+  const c = geometry.coordinates;
+
+  if (type === 'Point') {
+    return { type, coords: new Float64Array([c[0], c[1]]), ringOffsets: null, partOffsets: null };
+  }
+
+  if (type === 'MultiPoint' || type === 'LineString') {
+    const coords = new Float64Array(c.length * 2);
+    for (let i = 0; i < c.length; i++) {
+      coords[i * 2] = c[i][0];
+      coords[i * 2 + 1] = c[i][1];
+    }
+    return { type, coords, ringOffsets: null, partOffsets: null };
+  }
+
+  // MultiLineString and Polygon are the same shape here: one level of rings
+  // over a flat coord buffer. MultiPolygon adds the part level on top.
+  const rings: any[][] = type === 'MultiPolygon' ? [] : c;
+  const partOffsets: number[] | null = type === 'MultiPolygon' ? [] : null;
+  if (type === 'MultiPolygon') {
+    for (const poly of c) {
+      partOffsets!.push(rings.length);
+      for (const ring of poly) rings.push(ring);
+    }
+    partOffsets!.push(rings.length);
+  }
+
+  let n = 0;
+  for (const r of rings) n += r.length;
+  const coords = new Float64Array(n * 2);
+  const ringOffsets = new Int32Array(rings.length + 1);
+  let k = 0;
+  for (let r = 0; r < rings.length; r++) {
+    ringOffsets[r] = k;
+    const ring = rings[r];
+    for (let i = 0; i < ring.length; i++) {
+      coords[k * 2] = ring[i][0];
+      coords[k * 2 + 1] = ring[i][1];
+      k++;
+    }
+  }
+  ringOffsets[rings.length] = k;
+
+  return {
+    type,
+    coords,
+    ringOffsets,
+    partOffsets: partOffsets ? new Int32Array(partOffsets) : null,
+  };
+}
+
 // TODO: return Float64Array directly instead of [number,number][] to
-// eliminate per-coord pair allocations and the packing loop in tile-worker.
+// eliminate per-coord pair allocations and the packing loop in
+// wasmts-handler.ts's phase1.
 export function processFeaturePhase1(
   fragments: GeoJSON.Feature[], wts: Wts, z: number,
   acc?: Phase1Accumulator | null,
@@ -109,11 +187,16 @@ export function processFeaturePhase1(
   const isPoint = fragments[0].geometry?.type === 'Point' || fragments[0].geometry?.type === 'MultiPoint';
   const parseFragments = isPoint ? [fragments[0]] : fragments;
 
+  // fromFlat matches GeoJsonReader.read geometry-for-geometry; wasmts pins
+  // that with a differential test (equalsExact), which is what lets this
+  // path skip the JSON text round trip entirely.
   if (__DEV__ && acc) t = performance.now();
-  const geoms = parseFragments.map(f =>
-    wts.io.GeoJSONReader.read(JSON.stringify(f.geometry))
-  );
-  if (__DEV__ && acc) acc.geojsonReadMs += performance.now() - t;
+  const geoms: WasmGeometry[] = parseFragments.map(f => {
+    const flat = flattenGeoJSON(f.geometry);
+    return wts.geom.fromFlat(
+      flat.type as any, flat.coords, 2, flat.ringOffsets, flat.partOffsets);
+  });
+  if (__DEV__ && acc) acc.constructMs += performance.now() - t;
 
   let geom: WasmGeometry;
   if (geoms.length === 1) {
@@ -189,12 +272,14 @@ export function processFeaturePhase1(
 }
 
 function clipToGeoGrid(geom: WasmGeometry, wts: Wts): WasmGeometry[] {
+  const factory = wts.geom.GeometryFactory.create0();
   const cell = GEO_CLIP_CELL_DEG;
   const results: WasmGeometry[] = [];
   for (let lon = -180; lon < 180; lon += cell) {
     for (let lat = -90; lat < 90; lat += cell) {
-      const clipEnv = wts.geom.toGeometry(
-        wts.geom.createEnvelope(lon, lon + cell, Math.max(lat, -90), Math.min(lat + cell, 90)),
+      const clipEnv = wts.geom.GeometryFactory.toGeometry(
+        factory,
+        wts.geom.Envelope.create4(lon, lon + cell, Math.max(lat, -90), Math.min(lat + cell, 90)),
       );
       try {
         const clipped = wts.geom.intersection(geom, clipEnv);

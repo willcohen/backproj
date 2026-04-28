@@ -1,10 +1,15 @@
 /**
- * tile-processor.ts -- Worker pool orchestrator for MVT reprojection.
+ * tile-processor.ts -- Joint-pool orchestrator for MVT reprojection.
+ *
+ * A single worker-router WorkerPool hosts BOTH the wasmts handler
+ * (phase1/phase2 geometry ops) and the proj handler (PROJ ccall
+ * dispatch). Per tile, phase1, proj.transformCoordsF64, and phase2 all
+ * run on the same worker, eliminating cross-pool coord transfer.
  *
  * End-to-end data flow for reprojectTile(z, x, y):
  *
- * MAIN THREAD                            WORKER (tile-worker.ts)
- * -----------                            ----------------------
+ * MAIN THREAD                            JOINT-POOL WORKER (one per request)
+ * -----------                            ----------------------------------
  * 1. Inverse-project output tile
  *    corners to real WGS84 bbox.
  *    Skip if outside area of use;
@@ -14,42 +19,28 @@
  * 3. Fetch input tile PBFs
  *    (LRU-cached).
  *    [abort check]
- * 4. Send PBFs to worker --------->  5. PHASE 1: decode PBFs, group
- *                                       fragments by feature ID, stitch
- *                                       (CoverageUnion), adaptive densify,
- *                                       extract flat coord arrays.
- *                                       Retain geometry handles for phase 2.
- *    <--------- coord arrays
- *    [abort check]
- * 6. Batch-transform all coords
- *    via proj-wasm (single
- *    transformCoordsF64 call),
- *    split results per feature.
- *    [abort check]
- * 7. Send transformed coords ---->  8. PHASE 2: apply transformed coords
- *    (+ debug overlay geometry        back onto retained geometries,
- *    if enabled)                      repair invalidity, clip to output
- *                                     tile envelope, snap to MVT grid,
- *                                     encode output PBF.
- *    <--------- encoded PBF
+ * 4. wasmts.chain RPC ------------>     5. PHASE 1: decode PBFs, group
+ *    (tile bytes + PJ pointers             fragments by feature ID, stitch,
+ *     + phase2 params)                     adaptive densify, extract flat
+ *                                          coord arrays.
+ *                                       6. TRANSFORM: proj_trans_array on
+ *                                          the co-resident proj handler,
+ *                                          direct call, no RPC hop.
+ *                                       7. PHASE 2: apply transformed
+ *                                          coords, repair, clip, snap,
+ *                                          encode.
+ *    <----- encoded PBF
  *
- * WHY TWO PHASES: proj-wasm manages its own internal worker pool with a
- * single shared WASM context. It cannot be instantiated inside another
- * worker (browsers block nested workers). All projection math stays on
- * the main thread; workers handle synchronous wasmts (JTS) geometry
- * operations in both phases, keeping the main thread free between the
- * two postMessage round-trips.
- *
- * The pool round-robins requests across workers. Phase 2 is routed to
- * the same worker that handled phase 1 for a given request, because
- * the worker retains intermediate geometry state between phases.
- *
- * Profiling data flows back from workers via phase1Result/phase2Result
- * messages. performance.mark/measure entries (bp:tile:*, bp:transformCoords:*)
- * appear in the DevTools Performance "Timings" lane when profiling is enabled.
+ * The transformer pool ties tile dispatch to worker affinity: each
+ * transformer's PJ was created on a specific worker (by proj-wasm's
+ * context_create claim), and the chain RPC targets that worker, where
+ * the PJ pointer is valid and the proj handler is co-resident.
  */
 import type { LRUCache } from 'lru-cache';
-import { Transformer, transformCoordsF64, MAX_MERC_LAT } from './proj.js';
+import {
+  Transformer, transformCoordsF64, MAX_MERC_LAT,
+  initProj, shutdownProj, projPoolMismatch,
+} from './proj.js';
 import {
   fakeBoundsForTile, outputTileToRealBounds, chooseInputZoom,
   enumerateInputTiles,
@@ -60,6 +51,15 @@ import {
   profiling, recordTileProfile, setProfilingMetadata,
 } from './profiling.js';
 import type { WorkerProfile } from './profiling.js';
+import {
+  isCaptureEnabled, recordInputRequest, recordTileBytes,
+} from './capture.js';
+import { worker_call, pool_size } from 'ffi-wasm/pool';
+import {
+  register_handler_BANG_, make_wiring_BANG_, ensure_wired_BANG_,
+  wiring_pool, shutdown_wiring_BANG_,
+} from 'ffi-wasm/workload-pool';
+import { handlerSpec, handlerDefaultInitArgs } from 'proj-wasm';
 
 export interface TileProcessor {
   reprojectTile(
@@ -68,11 +68,38 @@ export interface TileProcessor {
     fetchTile: FetchTileFn,
     cache?: LRUCache<string, ArrayBuffer>,
     signal?: AbortSignal,
+    outputRequestId?: string,
   ): Promise<ArrayBuffer>;
   setTransformerPool(transformers: Transformer[]): void;
-  shutdown(): void;
+  /** Resolves when the pool and proj-wasm teardown have completed; a
+   *  caller that rebuilds immediately must await it, or the late
+   *  teardown races the next pool's init. */
+  shutdown(): Promise<void>;
   readonly poolSize: number;
-  cleanupRequest(requestId: string): void;
+  /** The underlying worker-router pool. Observability for the lifecycle
+   *  test (pool goes null after shutdown); reads through the registry. */
+  readonly pool: any;
+}
+
+const WASMTS_HANDLER_KEY = 'net.willcohen.wasmts';
+
+const isNode = (() => {
+  const p = (globalThis as any).process;
+  return !!(p && p.versions && p.versions.node);
+})();
+
+/**
+ * proj-wasm tags returned PJ objects with the worker they were created on;
+ * _tFwd covers the compound-CRS case where _tPipeline is undefined. A null
+ * return is a broken state, not a graceful one: the chain RPC would land
+ * on an arbitrary worker where the transformer's PJ pointer is not valid.
+ */
+function workerIdxFromTransformer(t: Transformer): number | null {
+  const tp: any = t._tPipeline;
+  if (tp && typeof tp.worker_idx === 'number') return tp.worker_idx;
+  const fwd: any = t._tFwd;
+  if (fwd && typeof fwd.worker_idx === 'number') return fwd.worker_idx;
+  return null;
 }
 
 export function detectWasmtsUrl(): string | null {
@@ -93,201 +120,206 @@ export function detectWasmtsUrl(): string | null {
   return null;
 }
 
-interface PendingCall {
-  resolve: (msg: any) => void;
-  reject: (err: Error) => void;
+export interface CreateTileProcessorOpts {
+  wasmtsUrl?: string;
+  /** Worker count; defaults to navigator.hardwareConcurrency. Only honored
+   *  on the first createTileProcessor call. A different knob from tiles in
+   *  flight: shrinking the pool does not bound fan-out; queued chain calls
+   *  hold their tile bytes in the worker inbox until they run. */
+  poolSize?: number;
 }
 
-interface PoolWorker {
-  worker: Worker;
-}
-
-const WORKER_INIT_TIMEOUT_MS = 30_000;
-
-async function createWorkerFromUrl(url: string): Promise<Worker> {
-  const resp = await fetch(url);
-  const text = await resp.text();
-  const blob = new Blob([text], { type: 'application/javascript' });
-  return new Worker(URL.createObjectURL(blob));
-}
-
-class WorkerPool {
-  private workers: PoolWorker[] = [];
-  private pendingCalls = new Map<string, PendingCall>();
-  private nextWorker = 0;
-  private requestWorkerMap = new Map<string, number>();
+class JointPoolClient {
+  /** One clj-native wiring per client: it owns the registry of the
+   *  current lifecycle and the memo that makes the wiring pass run once. */
+  private wiring: any = make_wiring_BANG_();
   private profilingSynced = false;
   private debugLabelsSynced = false;
+  private workerCount = 0;
+  private projAdopted = false;
 
-  async init(poolSize: number, wasmtsUrl: string): Promise<void> {
-    const workerUrl = new URL('./tile-worker.js', import.meta.url).href;
+  /** Live pool via wiring_pool (TS cannot deref squint atoms directly).
+   *  Null before init and after shutdown. */
+  get pool(): any {
+    return wiring_pool(this.wiring);
+  }
 
-    const readyPromises: Promise<void>[] = [];
+  /**
+   * Run the wiring pass with every handler spec registered, then hand
+   * the one pool to proj-wasm via proj.init({pool}) so proj-wasm adopts
+   * it instead of spawning its own. Returns the pool size after init.
+   */
+  async init(
+    poolSize: number,
+    wasmtsHandlerOpts: WasmtsHandlerOpts,
+  ): Promise<number> {
+    // The wiring pass folds every handler spec into one worker-router
+    // pool. handlerDefaultInitArgs reads proj's db/ini assets, an async
+    // read, which is why registration happens inside the pass.
+    const pool = await ensure_wired_BANG_(this.wiring, {
+      'registry-opts': { size: poolSize },
+      'register!': async (registry: any) => {
+        // The proj handler registers THROUGH the bridge so the created
+        // instance is reachable by the co-resident wasmts handler (chain
+        // fusion). Spread keeps proj's pre-terminate hook on the entry.
+        const projSpec: any = handlerSpec(await handlerDefaultInitArgs({}));
+        const bridgeUrl = new URL('./proj-handler-bridge.mjs', import.meta.url).href;
+        register_handler_BANG_(registry, 'compute', 'net.willcohen.proj', {
+          ...projSpec,
+          module: bridgeUrl,
+          args: { projHandlerUrl: projSpec.module, projArgs: projSpec.args },
+        });
 
-    for (let i = 0; i < poolSize; i++) {
-      const worker = await createWorkerFromUrl(workerUrl);
-      const pw: PoolWorker = { worker };
-      this.workers.push(pw);
+        // wasmts-handler.mjs ships in backproj's own dist next to backproj.mjs.
+        const wasmtsHandlerUrl = new URL('./wasmts-handler.mjs', import.meta.url).href;
+        register_handler_BANG_(registry, 'compute', WASMTS_HANDLER_KEY,
+          { module: wasmtsHandlerUrl, args: { ...wasmtsHandlerOpts, projBridgeUrl: bridgeUrl } });
+      },
+    });
+    this.workerCount = pool_size(pool);
 
-      const workerIdx = i;
-      const readyPromise = new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(new Error(`Worker ${workerIdx} init timed out after ${WORKER_INIT_TIMEOUT_MS}ms`));
-        }, WORKER_INIT_TIMEOUT_MS);
-
-        const onReady = (e: MessageEvent) => {
-          if (e.data.cmd === 'ready') {
-            clearTimeout(timer);
-            worker.removeEventListener('message', onReady);
-            resolve();
-          }
-        };
-        worker.addEventListener('message', onReady);
-      });
-      readyPromises.push(readyPromise);
-
-      worker.addEventListener('error', (e) => {
-        console.error(`[tile-processor] worker ${workerIdx} error:`, e.message || e.filename || e.type, 'lineno:', e.lineno, 'colno:', e.colno);
-      });
-
-      worker.addEventListener('message', (e: MessageEvent) => {
-        const { requestId } = e.data;
-        if (!requestId) return;
-        const pending = this.pendingCalls.get(requestId + ':' + e.data.cmd);
-        if (pending) {
-          this.pendingCalls.delete(requestId + ':' + e.data.cmd);
-          if (e.data.error) {
-            pending.reject(new Error(e.data.error));
-          } else {
-            pending.resolve(e.data);
-          }
-        }
-      });
-
-      worker.postMessage({ cmd: 'init', wasmtsUrl, workerIdx });
+    // proj.init({pool}) adopts (owned=false) instead of spawning its own
+    // pool. A bare initProj() before createTileProcessor leaves proj-wasm
+    // on its own workers, and its init memo swallows the adoption below:
+    // every PJ then lives on workers the fused chain never targets, and
+    // each chain traps with "memory access out of bounds" on the foreign
+    // pointer. Tear the standalone init down and re-init onto this pool.
+    if (projPoolMismatch(pool)) {
+      await shutdownProj();
     }
+    await initProj({ pool });
+    this.projAdopted = true;
 
-    await Promise.all(readyPromises);
+    return this.workerCount;
   }
 
-  private pickWorker(): number {
-    const idx = this.nextWorker;
-    this.nextWorker = (this.nextWorker + 1) % this.workers.length;
-    return idx;
-  }
-
-  phase1(
-    requestId: string,
-    tileData: ArrayBuffer[],
-    tileCoords: TileCoord[],
-    outputZ: number,
-  ): Promise<{ coordArrays: Float64Array[] }> {
-    const workerIdx = this.pickWorker();
-    this.requestWorkerMap.set(requestId, workerIdx);
-
-    return new Promise((resolve, reject) => {
-      this.pendingCalls.set(requestId + ':phase1Result', { resolve, reject });
-      // Not transferred: tileData buffers may be shared with the LRU cache.
-      // Transferring would neuter cached entries. Structured clone is correct here.
-      this.workers[workerIdx].worker.postMessage({
-        cmd: 'phase1',
-        requestId,
-        tileData,
-        tileCoords,
-        outputZ,
-      });
-    });
-  }
-
-  phase2(
-    requestId: string,
-    transformedCoords: Float64Array[],
-    fakeBounds: { west: number; south: number; east: number; north: number },
-    scale: number,
-    outputZ: number, outputX: number, outputY: number,
-    debugInputBounds?: number[][][],
-    debugInputLabels?: { label: string; cx: number; cy: number }[],
-  ): Promise<{ data: ArrayBuffer }> {
-    const workerIdx = this.requestWorkerMap.get(requestId);
-    if (workerIdx === undefined) throw new Error(`no worker mapped for requestId ${requestId}`);
-    this.requestWorkerMap.delete(requestId);
-
-    const transfer = transformedCoords.map(a => a.buffer);
-    return new Promise((resolve, reject) => {
-      this.pendingCalls.set(requestId + ':phase2Result', { resolve, reject });
-      this.workers[workerIdx].worker.postMessage(
-        { cmd: 'phase2', requestId, transformedCoords, fakeBounds, scale, outputZ, outputX, outputY, debugInputBounds, debugInputLabels },
-        transfer as any,
-      );
-    });
-  }
-
-  syncConfig(): void {
+  async syncConfig(): Promise<void> {
     if (__DEV__) {
       const wantProfiling = profiling.enabled;
       if (wantProfiling !== this.profilingSynced) {
-        for (const pw of this.workers) {
-          pw.worker.postMessage({ cmd: 'setConfig', profilingEnabled: wantProfiling });
-        }
+        await this.broadcastSetConfig({ profilingEnabled: wantProfiling });
         this.profilingSynced = wantProfiling;
       }
     }
     const wantDebug = debugConfig.labels;
     if (wantDebug !== this.debugLabelsSynced) {
-      for (const pw of this.workers) {
-        pw.worker.postMessage({ cmd: 'setConfig', debugLabels: wantDebug });
-      }
+      await this.broadcastSetConfig({ debugLabels: wantDebug });
       this.debugLabelsSynced = wantDebug;
     }
   }
 
-  get size(): number {
-    return this.workers.length;
+  private async broadcastSetConfig(args: any): Promise<void> {
+    const promises: Promise<any>[] = [];
+    for (let i = 0; i < this.workerCount; i++) {
+      promises.push(worker_call(this.pool, WASMTS_HANDLER_KEY, 'setConfig',
+        [{ ...args, workerIdx: i }], i));
+    }
+    await Promise.all(promises);
   }
 
-  cleanupRequest(requestId: string): void {
-    const workerIdx = this.requestWorkerMap.get(requestId);
-    if (workerIdx !== undefined) {
-      this.workers[workerIdx].worker.postMessage({ cmd: 'cleanup', requestId });
-      this.requestWorkerMap.delete(requestId);
-    }
-    this.pendingCalls.delete(requestId + ':phase1Result');
-    this.pendingCalls.delete(requestId + ':phase2Result');
+  chain(args: any, workerIdx: number | null): Promise<{
+    data: ArrayBuffer | Uint8Array;
+    coordCount: number;
+    transformMs?: number;
+    phase1Profile?: any;
+    phase2Profile?: any;
+  }> {
+    return worker_call(this.pool, WASMTS_HANDLER_KEY, 'chain', [args], workerIdx);
   }
 
-  shutdown(): void {
-    for (const pw of this.workers) {
-      pw.worker.terminate();
+  get size(): number { return this.workerCount; }
+
+  /**
+   * shutdownProj() BEFORE this client's teardown, and the order is
+   * load-bearing: proj-wasm holds its own wiring, and only shutdownProj
+   * clears its memo. A stale memo would hand the next initProj the cached
+   * pool and route every transform to dead workers. Pinned by
+   * pool-lifecycle.test.mjs.
+   */
+  async shutdown(): Promise<void> {
+    if (this.projAdopted) {
+      this.projAdopted = false;
+      await shutdownProj();
     }
-    this.workers = [];
-    this.pendingCalls.clear();
-    this.requestWorkerMap.clear();
+    // Resolves to null and does nothing when this client never wired.
+    await shutdown_wiring_BANG_(this.wiring);
+    this.workerCount = 0;
   }
+}
+
+interface WasmtsHandlerOpts {
+  wasmtsJsUrl: string;
+  wasmtsWasmBinary?: ArrayBuffer | Uint8Array;
+}
+
+async function buildWasmtsHandlerOpts(wasmtsUrl?: string): Promise<WasmtsHandlerOpts> {
+  if (isNode) {
+    // Resolve @wcohen/wasmts main + sibling .wasm. Dynamic-import 'fs' and
+    // 'url' here so the browser bundle doesn't pull node-only modules at
+    // static-import time.
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    // @ts-ignore -- import.meta.resolve is sync stable in Node 20.6+
+    const wasmtsJsUrl: string = (import.meta as any).resolve('@wcohen/wasmts');
+    const wasmtsWasmUrl = new URL('./wasmts.js.wasm', wasmtsJsUrl).href;
+    const wasmtsWasmBinary = readFileSync(fileURLToPath(wasmtsWasmUrl));
+    return { wasmtsJsUrl, wasmtsWasmBinary };
+  }
+  // Browser: use the caller-provided URL or detect from the page; native fetch
+  // handles the .wasm sibling.
+  const resolved = wasmtsUrl ?? detectWasmtsUrl();
+  if (!resolved) {
+    throw new Error(
+      'Could not detect wasmts URL. Include a <script src="...wasmts.js"> tag, ' +
+      'an importmap entry for @wcohen/wasmts, or pass wasmtsUrl to createTileProcessor().',
+    );
+  }
+  return { wasmtsJsUrl: resolved };
 }
 
 export const debugConfig = { labels: false };
 
-let sharedPool: WorkerPool | null = null;
+let sharedPool: JointPoolClient | null = null;
+let sharedPoolPromise: Promise<JointPoolClient> | null = null;
+
+async function buildSharedPool(opts: CreateTileProcessorOpts): Promise<JointPoolClient> {
+  const wasmtsOpts = await buildWasmtsHandlerOpts(opts.wasmtsUrl);
+  const poolSize = opts.poolSize ?? (typeof navigator !== 'undefined'
+    ? (navigator.hardwareConcurrency || 4)
+    : 4);
+  const client = new JointPoolClient();
+  await client.init(poolSize, wasmtsOpts);
+  sharedPool = client;
+  if (__DEV__) setProfilingMetadata({ poolSize: client.size });
+  return client;
+}
+
+/**
+ * Memoize the promise, assigned before the first await: checking
+ * `sharedPool` instead would let two concurrent callers each build a pool
+ * and orphan one with its workers' heaps. A failed build clears the memo
+ * so the next caller retries. This latches the CLIENT (wiring + wasmts
+ * asset read + proj adoption), not the wiring alone.
+ */
+function acquireSharedPool(opts: CreateTileProcessorOpts): Promise<JointPoolClient> {
+  if (!sharedPoolPromise) {
+    sharedPoolPromise = buildSharedPool(opts).catch((err) => {
+      sharedPoolPromise = null;
+      throw err;
+    });
+  }
+  return sharedPoolPromise;
+}
 let nextRequestId = 0;
 
-export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProcessor> {
-  if (!sharedPool) {
-    const url = wasmtsUrl ?? detectWasmtsUrl();
-    if (!url) {
-      throw new Error(
-        'Could not detect wasmts URL. Include a <script src="...wasmts.js"> tag ' +
-        'or pass wasmtsUrl to createTileProcessor().',
-      );
-    }
-    const poolSize = typeof navigator !== 'undefined'
-      ? (navigator.hardwareConcurrency || 4)
-      : 4;
-    sharedPool = new WorkerPool();
-    await sharedPool.init(poolSize, url);
-    if (__DEV__) setProfilingMetadata({ poolSize });
-  }
-
-  const pool = sharedPool;
+export async function createTileProcessor(
+  wasmtsUrlOrOpts?: string | CreateTileProcessorOpts,
+): Promise<TileProcessor> {
+  // Accept a bare wasmtsUrl string (legacy positional) or an opts object.
+  const opts: CreateTileProcessorOpts = typeof wasmtsUrlOrOpts === 'string'
+    ? { wasmtsUrl: wasmtsUrlOrOpts }
+    : (wasmtsUrlOrOpts ?? {});
+  const pool = await acquireSharedPool(opts);
   let transformerPool: Transformer[] | null = null;
   let nextTransformerIdx = 0;
 
@@ -298,12 +330,22 @@ export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProce
       fetchTile: FetchTileFn,
       cache?: LRUCache<string, ArrayBuffer>,
       signal?: AbortSignal,
+      outputRequestId?: string,
     ): Promise<ArrayBuffer> {
       const effectiveTransformer = transformerPool
         ? transformerPool[nextTransformerIdx++ % transformerPool.length]
         : transformer;
+      const workerIdx = workerIdxFromTransformer(effectiveTransformer);
+      if (workerIdx == null) {
+        throw new Error(
+          'reprojectTile: transformer carries no worker index; its PJ pointers '
+          + 'are only valid on the worker that created them, so an unpinned '
+          + 'chain dispatch would transform through a foreign proj heap');
+      }
       const requestId = String(nextRequestId++);
-      pool.syncConfig();
+      const captureRequestId = outputRequestId ?? requestId;
+
+      await pool.syncConfig();
       const enabled = __DEV__ && profiling.enabled;
       let tTotal = 0, t0 = 0;
       if (__DEV__ && enabled) {
@@ -324,10 +366,7 @@ export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProce
             realBounds.north < aou.south || realBounds.south > aou.north) {
           return new ArrayBuffer(0);
         }
-      }
-
-      // Clamp to area of use to prevent fetching the entire globe.
-      if (aou) {
+        // Clamp to area of use to prevent fetching the entire globe.
         realBounds.west = Math.max(realBounds.west, aou.west);
         realBounds.east = Math.min(realBounds.east, aou.east);
         realBounds.south = Math.max(realBounds.south, aou.south);
@@ -342,19 +381,32 @@ export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProce
 
       let cacheHits = 0, cacheMisses = 0;
       const cachedFetch = async (fz: number, fx: number, fy: number): Promise<ArrayBuffer> => {
+        const captureOn = isCaptureEnabled();
         if (!cache) {
           if (__DEV__ && enabled) cacheMisses++;
-          return fetchTile(fz, fx, fy);
+          const data = await fetchTile(fz, fx, fy);
+          if (captureOn) {
+            recordInputRequest({ outputRequestId: captureRequestId, z: fz, x: fx, y: fy, cacheHit: false });
+            recordTileBytes(fz, fx, fy, data);
+          }
+          return data;
         }
         const key = `${fz}/${fx}/${fy}`;
         const cached = cache.get(key);
         if (cached) {
           if (__DEV__ && enabled) cacheHits++;
+          if (captureOn) {
+            recordInputRequest({ outputRequestId: captureRequestId, z: fz, x: fx, y: fy, cacheHit: true });
+          }
           return cached;
         }
         if (__DEV__ && enabled) cacheMisses++;
         const data = await fetchTile(fz, fx, fy);
         cache.set(key, data);
+        if (captureOn) {
+          recordInputRequest({ outputRequestId: captureRequestId, z: fz, x: fx, y: fy, cacheHit: false });
+          recordTileBytes(fz, fx, fy, data);
+        }
         return data;
       };
 
@@ -373,7 +425,9 @@ export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProce
       let fetchMs = 0;
       if (__DEV__ && enabled) fetchMs = performance.now() - t0;
 
-      if (signal?.aborted) return new ArrayBuffer(0);
+      if (signal?.aborted) {
+        return new ArrayBuffer(0);
+      }
 
       if (validTiles.length === 0) {
         return new ArrayBuffer(0);
@@ -381,59 +435,6 @@ export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProce
 
       const tileData = validTiles.map(t => t.data);
       const tileCoords = validTiles.map(t => t.coord);
-
-      if (__DEV__ && enabled) t0 = performance.now();
-      const phase1Result = await pool.phase1(requestId, tileData, tileCoords, z);
-      let phase1RoundtripMs = 0;
-      if (__DEV__ && enabled) phase1RoundtripMs = performance.now() - t0;
-
-      const { coordArrays } = phase1Result;
-      const phase1WorkerProfile = (phase1Result as any).profile;
-
-      if (signal?.aborted) {
-        pool.cleanupRequest(requestId);
-        return new ArrayBuffer(0);
-      }
-
-      if (coordArrays.length === 0) {
-        return new ArrayBuffer(0);
-      }
-
-      if (__DEV__ && enabled) t0 = performance.now();
-      let totalCoords = 0;
-      for (const flat of coordArrays) totalCoords += flat.length / 4;
-
-      const allF64 = new Float64Array(totalCoords * 4);
-      let writeIdx = 0;
-      for (const flat of coordArrays) {
-        allF64.set(flat, writeIdx);
-        writeIdx += flat.length;
-      }
-      let marshalMs = 0;
-      if (__DEV__ && enabled) marshalMs = performance.now() - t0;
-
-      if (__DEV__ && enabled) t0 = performance.now();
-      const allTransformed = await transformCoordsF64(allF64, effectiveTransformer);
-      let transformCoordsMs = 0;
-      if (__DEV__ && enabled) {
-        transformCoordsMs = performance.now() - t0;
-        performance.measure(`bp:transformCoords:${requestId}`, { start: t0, duration: transformCoordsMs });
-      }
-
-      if (signal?.aborted) {
-        pool.cleanupRequest(requestId);
-        return new ArrayBuffer(0);
-      }
-
-      if (__DEV__ && enabled) t0 = performance.now();
-      const transformedArrays: Float64Array[] = [];
-      let readIdx = 0;
-      for (const flat of coordArrays) {
-        const len = flat.length;
-        transformedArrays.push(allTransformed.slice(readIdx, readIdx + len));
-        readIdx += len;
-      }
-      if (__DEV__ && enabled) marshalMs += performance.now() - t0;
 
       const fakeBounds = fakeBoundsForTile(z, x, y);
       const scale = 4096 / (fakeBounds.east - fakeBounds.west);
@@ -457,26 +458,25 @@ export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProce
           const pts: [number, number][] = [];
           for (let i = 0; i <= EDGE_PTS; i++) {
             const t = i / EDGE_PTS;
-            pts.push([w + t * (e - w), clampS]);        // bottom
+            pts.push([w + t * (e - w), clampS]);
           }
           for (let i = 0; i <= EDGE_PTS; i++) {
             const t = i / EDGE_PTS;
-            pts.push([e, clampS + t * (clampN - clampS)]); // right
+            pts.push([e, clampS + t * (clampN - clampS)]);
           }
           for (let i = 0; i <= EDGE_PTS; i++) {
             const t = i / EDGE_PTS;
-            pts.push([e - t * (e - w), clampN]);         // top (reversed)
+            pts.push([e - t * (e - w), clampN]);
           }
           for (let i = 0; i <= EDGE_PTS; i++) {
             const t = i / EDGE_PTS;
-            pts.push([w, clampN - t * (clampN - clampS)]); // left (reversed)
+            pts.push([w, clampN - t * (clampN - clampS)]);
           }
           tilePtCounts.push(pts.length);
           allBoundaryPts.push(...pts);
           tileCenters.push([(w + e) / 2, (clampS + clampN) / 2]);
           tileLabels.push(`${tc.z}/${tc.x}/${tc.y}`);
         }
-        // Transform boundary points + center points together
         const totalPts = allBoundaryPts.length + tileCenters.length;
         const dbgF64 = new Float64Array(totalPts * 4);
         for (let i = 0; i < allBoundaryPts.length; i++) {
@@ -511,23 +511,47 @@ export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProce
         }
       }
 
-      if (__DEV__ && enabled) t0 = performance.now();
-      const phase2Result = await pool.phase2(requestId, transformedArrays, fakeBounds, scale, z, x, y, debugInputBounds, debugInputLabels);
-      let phase2RoundtripMs = 0;
-      if (__DEV__ && enabled) phase2RoundtripMs = performance.now() - t0;
+      // Raw PJ pointers are valid only on the worker that created them
+      // (the chain RPC targets it) and only while the transformer stays
+      // alive across the call.
+      const tp: any = effectiveTransformer._tPipeline;
+      const transformDesc = tp
+        ? { pipelinePtr: tp.ptr }
+        : {
+            fwdPtr: (effectiveTransformer._tFwd as any).ptr,
+            invMercPtr: (effectiveTransformer._tInvMerc as any).ptr,
+            affine: [
+              effectiveTransformer._Sx, effectiveTransformer._Sy,
+              effectiveTransformer._Ox, effectiveTransformer._Oy,
+            ],
+          };
 
-      const { data } = phase2Result;
-      const phase2WorkerProfile = (phase2Result as any).profile;
+      if (__DEV__ && enabled) t0 = performance.now();
+      const chainResult = await pool.chain({
+        tileData, tileCoords, outputZ: z,
+        transform: transformDesc,
+        fakeBounds, scale, outputX: x, outputY: y,
+        debugInputBounds, debugInputLabels,
+      }, workerIdx);
+      let chainRoundtripMs = 0;
+      if (__DEV__ && enabled) chainRoundtripMs = performance.now() - t0;
+
+      const data = chainResult.data instanceof Uint8Array
+        ? (chainResult.data.buffer as ArrayBuffer).slice(
+            chainResult.data.byteOffset,
+            chainResult.data.byteOffset + chainResult.data.byteLength,
+          )
+        : chainResult.data;
+      const phase1WorkerProfile = chainResult.phase1Profile;
+      const phase2WorkerProfile = chainResult.phase2Profile;
 
       if (__DEV__ && enabled) {
         const workerProfile: WorkerProfile = {
           workerId: phase1WorkerProfile?.workerId ?? -1,
-          phase1Ms: phase1WorkerProfile?.phase1Ms ?? phase1RoundtripMs,
+          phase1Ms: phase1WorkerProfile?.phase1Ms ?? chainRoundtripMs,
           phase1Detail: phase1WorkerProfile?.phase1Detail ?? emptyPhase1Detail(),
-          phase2Ms: phase2WorkerProfile?.phase2Ms ?? phase2RoundtripMs,
+          phase2Ms: phase2WorkerProfile?.phase2Ms ?? 0,
           phase2Detail: phase2WorkerProfile?.phase2Detail ?? emptyPhase2Detail(),
-          idleBeforePhase1Ms: phase1WorkerProfile?.idleBeforePhase1Ms ?? 0,
-          interPhaseIdleMs: phase1WorkerProfile?.interPhaseIdleMs ?? 0,
         };
 
         recordTileProfile({
@@ -540,52 +564,59 @@ export async function createTileProcessor(wasmtsUrl?: string): Promise<TileProce
           fetchCount: inputTiles.length,
           cacheHits,
           cacheMisses,
-          transformCoordsMs,
-          coordCount: totalCoords,
-          marshalMs,
+          transformCoordsMs: chainResult.transformMs ?? 0,
+          coordCount: chainResult.coordCount,
+          chainRoundtripMs,
           worker: workerProfile,
         });
 
         performance.measure(`bp:tile:${z}/${x}/${y}`, `bp:tile:start:${requestId}`);
       }
 
-      return data;
+      return data as ArrayBuffer;
     },
 
     get poolSize(): number {
       return pool.size;
     },
 
-    cleanupRequest(requestId: string): void {
-      pool.cleanupRequest(requestId);
+    get pool(): any {
+      return pool.pool;
     },
+
 
     setTransformerPool(transformers: Transformer[]): void {
       transformerPool = transformers;
       nextTransformerIdx = 0;
     },
 
-    shutdown(): void {
+    shutdown(): Promise<void> {
       if (sharedPool === pool) {
-        sharedPool.shutdown();
         sharedPool = null;
+        sharedPoolPromise = null;
+        return pool.shutdown();
       }
+      return Promise.resolve();
     },
   };
 }
 
-export function shutdownTileWorkers(): void {
+export function shutdownTileWorkers(): Promise<void> {
   if (sharedPool) {
-    sharedPool.shutdown();
+    const pool = sharedPool;
     sharedPool = null;
+    sharedPoolPromise = null;
+    return pool.shutdown();
   }
+  return Promise.resolve();
 }
 
 function emptyPhase1Detail(): import('./profiling.js').Phase1Detail {
   return {
-    decodeMs: 0, featureCount: 0, fragmentCount: 0,
+    decodeMs: 0, decodeCacheHits: 0, decodeCacheMisses: 0,
+    featureCount: 0, fragmentCount: 0,
     stitchMs: 0, stitchCount: 0,
-    densifyMs: 0, coordExtractMs: 0, coordsProduced: 0, geojsonReadMs: 0,
+    densifyMs: 0, coordExtractMs: 0, coordsProduced: 0, constructMs: 0,
     preDensifyCoords: 0, postDensifyCoords: 0,
   };
 }

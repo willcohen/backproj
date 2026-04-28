@@ -3,7 +3,14 @@ dist
 .DS_Store
 results/
 test-results/
+fixtures/
 .clj-kondo/
 .lsp/
 .portal/
 *.allium
+.claude/
+CLAUDE.md
+.mcp.json
+WORKPLAN.md
+docs/plans/
+bench-results/

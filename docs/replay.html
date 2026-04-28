@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>backproj replay</title>
+<!-- server.mjs sets COOP/COEP headers, so crossOriginIsolated is true for
+     the bench without a service worker. -->
+
+<!--
+  Importmap pinned to LOCAL paths so the bench exercises the local-tip
+  source rather than published versions, and replay stays offline.
+
+  docs/index.html (the public demo) keeps its CDN-pinned importmap;
+  this page is bench-only and the importmaps no longer mirror.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "squint-cljs/core.js": "/node_modules/squint-cljs/core.js",
+    "squint-cljs/src/squint/string.js": "/node_modules/squint-cljs/src/squint/string.js",
+    "resource-tracker": "/node_modules/resource-tracker/resource.mjs",
+    "proj-wasm": "/node_modules/proj-wasm/dist/proj.mjs",
+    "proj-wasm/proj-handler": "/node_modules/proj-wasm/dist/proj-handler.mjs",
+    "backproj": "/packages/backproj/dist/backproj.mjs",
+    "ffi-wasm": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/handler_runtime.mjs",
+    "ffi-wasm/handler-runtime": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/handler_runtime.mjs",
+    "ffi-wasm/handler-fs": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/handler_fs.mjs",
+    "ffi-wasm/pool": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/pool.mjs",
+    "ffi-wasm/workload-pool": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/workload_pool.mjs",
+    "ffi-wasm/dispatch": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/dispatch.mjs",
+    "ffi-wasm/platform-state": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/platform_state.mjs",
+    "clj-native": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/handler_runtime.mjs",
+    "clj-native/handler-runtime": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/handler_runtime.mjs",
+    "clj-native/handler-fs": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/handler_fs.mjs",
+    "clj-native/pool": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/pool.mjs",
+    "clj-native/dispatch": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/dispatch.mjs",
+    "clj-native/platform-state": "/node_modules/ffi-wasm/src/cljc/net/willcohen/native/platform_state.mjs",
+    "comlink": "/node_modules/comlink/dist/esm/comlink.mjs",
+    "worker-router": "/node_modules/worker-router/dist/index.mjs",
+    "worker-router/worker-bootstrap": "/node_modules/worker-router/dist/worker-bootstrap.mjs",
+    "lru-cache": "/node_modules/lru-cache/dist/esm/index.js",
+    "pbf": "/node_modules/pbf/index.js",
+    "@mapbox/vector-tile": "/node_modules/@mapbox/vector-tile/index.js",
+    "@mapbox/point-geometry": "/node_modules/@mapbox/point-geometry/index.js",
+    "@wcohen/wasmts": "/node_modules/@wcohen/wasmts/dist/wasmts.js"
+  }
+}
+</script>
+</head>
+<body>
+<pre id="status">loading...</pre>
+<script type="module">
+// Minimal page for offline fixture replay. No MapLibre, no map, no
+// network. The Node-side bench-replay harness drives this through
+// Playwright: initReplay -> loadFixtureTile* -> runReplay.
+import {
+  initProj, buildTransformer, buildTransformerPool, createTileProcessor, createTileCache,
+  enableProfiling, clearProfilingData, exportProfilingJSON,
+} from 'backproj';
+import { TILE_SUMMARY_SAMPLE_KEYS } from '/tests/lib/tile-summary.mjs';
+
+let processor = null;
+let transformer = null;
+let replayCache = null;
+let replayCacheMode = 'lru';
+const tileBytes = new Map();
+const status = document.getElementById('status');
+
+window.initReplay = async (crs, cacheMode, poolSize) => {
+  // Joint-pool flow: createTileProcessor builds the pool with both the
+  // wasmts and proj handlers, then internally calls proj.init({pool})
+  // so proj-wasm adopts (owned=false). buildTransformerPool must run
+  // AFTER pool init because projCreateCrsToCrs dispatches through the
+  // pool; each sequential call lands on a different worker via the
+  // ephemeral-context isolator's assign-worker-for-context! (least-
+  // loaded claim). The returned Transformer[] is round-robinned per
+  // tile inside reprojectTile, so every worker carries a slice of the
+  // projTransArray traffic instead of one worker serializing the lot.
+  status.textContent = `creating tile processor + initializing joint pool...`;
+  processor = await createTileProcessor({
+    ...(poolSize ? { poolSize } : {}),
+  });
+  status.textContent = `building transformer pool (size=${processor.poolSize}) for ${crs}...`;
+  const transformers = await buildTransformerPool(crs, processor.poolSize);
+  processor.setTransformerPool(transformers);
+  transformer = transformers[0];
+  enableProfiling();
+  // Cache lifecycle: created once at init, persists across all
+  // runReplay() calls. cache_mode=lru -> shared LRU steady-state.
+  // cache_mode=cold -> no cache; every input fetch is a miss against
+  // the disk-backed fixture.
+  replayCacheMode = cacheMode || 'lru';
+  replayCache = replayCacheMode === 'lru' ? createTileCache() : undefined;
+  status.textContent = `ready (cache=${replayCacheMode})`;
+};
+
+// Mirrors maplibre-proj's per-updateMap pool rebuild for sustained-load
+// repro. Intentionally does NOT destroy the prior pool's transformers --
+// we want to expose any context/claim leak that the live bench triggers.
+window.rebuildTransformerPool = async (crs, size) => {
+  const pool = await buildTransformerPool(crs, size);
+  if (processor && processor.setTransformerPool) processor.setTransformerPool(pool);
+  return pool.length;
+};
+
+window.loadFixtureTile = (key, bytesBase64) => {
+  const binary = atob(bytesBase64);
+  const buf = new ArrayBuffer(binary.length);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < binary.length; i++) view[i] = binary.charCodeAt(i);
+  tileBytes.set(key, buf);
+};
+
+window.fixtureSize = () => tileBytes.size;
+
+window.runReplay = async (outputRequests, label = 'pass', concurrency = 0) => {
+  if (!processor || !transformer) throw new Error('initReplay not called');
+  clearProfilingData();
+
+  const fetchFn = async (z, x, y) => {
+    const key = `${z}/${x}/${y}`;
+    const data = tileBytes.get(key);
+    if (!data) {
+      throw new Error(`fixture coverage violation: missing input tile ${key} (replay requested it but it is not in the captured byte cache)`);
+    }
+    return data.slice(0);
+  };
+
+  status.textContent = `${label}: replaying ${outputRequests.length} output tile requests...`;
+  const start = performance.now();
+  let ok = 0, empty = 0, failed = 0, lastError = null;
+  // Concurrent dispatch matches maplibre-gl's live behavior: it asks
+  // backproj to reproject many tiles in parallel as the user pans/zooms.
+  // Replays must exercise the same concurrent reprojectTile fan-out so
+  // any concurrency-only deadlocks surface here too.
+  // Promise.allSettled so one tile's failure doesn't take the whole pass
+  // down before counters land.
+  //
+  // concurrency > 0 caps how many tiles are in flight. Default 0 = unbounded,
+  // which is the live behavior AND the reason per-tile timings are unreadable:
+  // worker calls run serially, so fanning out all N tiles fills every worker's
+  // queue with phase1s before any transform is enqueued. The chain degenerates
+  // to all-phase1s -> all-transforms -> all-phase2s, and every tile's clock ends
+  // up spanning the whole pass. Cap it at 1 and a tile's roundtrip is its real
+  // work, which is the only way to read the proj-vs-wasmts split off this bench.
+  const runOne = (req) => processor.reprojectTile(
+    req.z, req.x, req.y, transformer, fetchFn, replayCache, undefined, req.requestId,
+  );
+  let settled;
+  if (concurrency > 0) {
+    settled = new Array(outputRequests.length);
+    let next = 0;
+    const lane = async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= outputRequests.length) return;
+        try {
+          settled[i] = { status: 'fulfilled', value: await runOne(outputRequests[i]) };
+        } catch (e) {
+          settled[i] = { status: 'rejected', reason: e };
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, outputRequests.length) }, lane));
+  } else {
+    settled = await Promise.allSettled(outputRequests.map(runOne));
+  }
+  for (const r of settled) {
+    if (r.status === 'fulfilled') {
+      if (r.value && r.value.byteLength > 0) ok++; else empty++;
+    } else {
+      failed++;
+      lastError = (r.reason && r.reason.message) || String(r.reason);
+    }
+  }
+  const wallMs = performance.now() - start;
+  // Return raw per-tile samples plus aggregate counters. The Node-side
+  // harness accumulates samples across multiple passes and computes
+  // mitata-shaped stats over the merged arrays. The sample-key set is
+  // TILE_SUMMARY_SAMPLE_KEYS, the same map the harness aggregates by,
+  // so the two cannot drift; each key resolves through the profile's
+  // nesting levels in order.
+  const profiling = JSON.parse(exportProfilingJSON());
+  const tiles = profiling.tiles || [];
+  const sampleOf = (t, key) =>
+    t[key]
+    ?? t.worker?.[key]
+    ?? t.worker?.phase1Detail?.[key]
+    ?? t.worker?.phase2Detail?.[key]
+    ?? 0;
+  const samples = Object.fromEntries(
+    Object.values(TILE_SUMMARY_SAMPLE_KEYS).map(key =>
+      [key, tiles.map(t => sampleOf(t, key))]));
+  const cacheStats = profiling.cacheStats || { hits: 0, misses: 0 };
+  let decodeCacheHits = 0, decodeCacheMisses = 0;
+  for (const t of tiles) {
+    decodeCacheHits += t.worker?.phase1Detail?.decodeCacheHits ?? 0;
+    decodeCacheMisses += t.worker?.phase1Detail?.decodeCacheMisses ?? 0;
+  }
+  status.textContent = `${label} done: ok=${ok} empty=${empty} failed=${failed} wall=${wallMs.toFixed(0)}ms`;
+  return {
+    wallMs, ok, empty, failed, lastError,
+    samples,
+    cacheHits: cacheStats.hits,
+    cacheMisses: cacheStats.misses,
+    decodeCacheHits, decodeCacheMisses,
+    tileCount: tiles.length,
+  };
+};
+</script>
+</body>
+</html>

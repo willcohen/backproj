@@ -56,15 +56,22 @@ const real = await inverseTransformCoords(fakeCoords, transformer);
 ### Vector tile reprojection (with worker pool)
 
 ```typescript
-import { initProj, buildTransformer, createTileProcessor, createTileCache } from 'backproj';
+import { buildTransformer, createTileProcessor, createTileCache } from 'backproj';
 
-await initProj();
-const transformer = await buildTransformer('EPSG:5070');
 const processor = await createTileProcessor(); // auto-detects wasmts URL
+const transformer = await buildTransformer('EPSG:5070');
 const cache = createTileCache();
 
 const pbf = await processor.reprojectTile(z, x, y, transformer, fetchTile, cache);
 ```
+
+Do not call `initProj` here, and create the processor before any
+transformer. `createTileProcessor` initializes proj-wasm onto the joint
+worker pool, and a transformer's PROJ objects live on the pool that
+exists when it is built; the fused tile chain can only reach objects on
+the joint pool. A bare `initProj()` beforehand is detected and
+re-initialized onto the pool, but transformers built before the
+processor still point at the torn-down pool and must be rebuilt.
 
 ## Supported CRS formats
 
@@ -87,7 +94,7 @@ but will produce visual artifacts.
 
 | Export | Description |
 |---|---|
-| `initProj()` | Initialize proj-wasm. Call once before anything else. |
+| `initProj()` | Initialize proj-wasm. Only for use without a tile processor; `createTileProcessor` initializes proj-wasm itself. |
 | `buildTransformer(crs)` | Compile a transformer for any projected CRS. |
 | `buildTransformerPool(crs, n)` | Build N transformers for parallel proj-wasm dispatch. |
 | `transformCoords(coords, t)` | Batch transform `[lon,lat][]` to fake coordinates. |

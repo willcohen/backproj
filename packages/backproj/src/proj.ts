@@ -248,11 +248,46 @@ async function sampleProjectionExtent(
 
 /**
  * Initialise proj-wasm. Must be called once before any other function.
- * Safe to call multiple times — subsequent calls are no-ops.
+ *
+ * Subsequent calls are no-ops, and the no-op ignores `opts` as well: proj-wasm
+ * memoises its init promise and hands the cached one back, so a second call
+ * carrying a different `pool` does NOT re-adopt. Anything that tears the pool
+ * down has to go through shutdownProj() to clear that memo, or the next init
+ * silently keeps pointing at the dead pool.
  */
-export async function initProj(): Promise<void> {
+let _projInitialized = false;
+let _initializedPool: any = null;
+
+export async function initProj(opts?: { pool?: any }): Promise<void> {
   _sharedInvMerc = null;
-  await proj.init();
+  await (proj.init as any)(opts);
+  // Record only the FIRST init's pool: proj-wasm's memo means later calls
+  // are no-ops whatever they carry, so the first pool is the live one.
+  if (!_projInitialized) {
+    _projInitialized = true;
+    _initializedPool = opts?.pool ?? null;
+  }
+}
+
+/** True when proj-wasm is initialized on some pool other than `pool`
+ *  (its own spawned one included). Detection is backproj-local: a
+ *  consumer that calls proj-wasm's init directly is not seen. */
+export function projPoolMismatch(pool: any): boolean {
+  return _projInitialized && _initializedPool !== pool;
+}
+
+/**
+ * Release proj-wasm's hold on the pool: drains the PJ disposers it still owes
+ * (which needs the workers alive, so call this BEFORE terminating them) and
+ * clears the memoised init promise so a later initProj re-adopts. proj-wasm
+ * leaves a caller-supplied pool alone here, since it adopted rather than
+ * spawned it; terminating is the caller's job.
+ */
+export async function shutdownProj(): Promise<void> {
+  _sharedInvMerc = null;
+  _projInitialized = false;
+  _initializedPool = null;
+  await (proj as any).shutdown_BANG_();
 }
 
 /**

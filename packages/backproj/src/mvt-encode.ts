@@ -57,7 +57,7 @@ export interface DebugTileInfo {
 export function encodeTilePbf(
   layers: OutputLayers,
   fakeBounds: { west: number; south: number; east: number; north: number },
-  wts: typeof import('@wcohen/wasmts'),
+  wts: typeof wasmts,
   debugTile?: DebugTileInfo | null,
   debugInputBounds?: number[][][] | null,
   debugInputLabels?: { label: string; cx: number; cy: number }[] | null,
@@ -159,25 +159,27 @@ export function encodeTilePbf(
   return (pbf.buffer as ArrayBuffer).slice(pbf.byteOffset, pbf.byteOffset + pbf.byteLength);
 }
 
-// TODO: replace GeoJSONWriter.write()+JSON.parse() with tree walk using
-// wasmts ring accessors (getExteriorRing, getInteriorRingN, getCoordinateSequence).
 function geomToGvtFeature(
   geom: WasmGeometry,
   properties: Record<string, any>,
   tm: TileMapping,
-  wts: typeof import('@wcohen/wasmts'),
+  wts: typeof wasmts,
   geojsonWriteAcc?: { ms: number } | null,
 ): GvtFeature | null {
+  // toFlat instead of GeoJsonWriter.write() + JSON.parse(): the writer costs a
+  // JSON text serialize in Java and a parse in JS, and nothing here wants text.
+  // toFlat hands back the same structure directly -- ringOffsets delimits rings,
+  // partOffsets delimits polygons, which is exactly what enforceWindingOrder
+  // needs to run per polygon.
   let t0 = 0;
   if (geojsonWriteAcc) t0 = performance.now();
-  const geojsonStr = wts.io.GeoJSONWriter.write(geom);
-  const geojson = JSON.parse(geojsonStr);
+  const flat = wts.geom.toFlat(geom, 2);
   if (geojsonWriteAcc) geojsonWriteAcc.ms += performance.now() - t0;
 
-  const type = gvtType(geojson.type);
+  const type = gvtType(flat.type);
   if (!type) return null;
 
-  const rings = coordsToTileLocal(geojson, tm);
+  const rings = flatToTileLocal(flat, tm);
   if (!rings || rings.length === 0) return null;
 
   return { geometry: rings, type, tags: properties };
@@ -213,7 +215,7 @@ interface TileMapping {
   invMercSpan: number; // EXTENT / (mercNorth - mercSouth)
 }
 
-function buildTileMapping(
+export function buildTileMapping(
   fakeBounds: { west: number; south: number; east: number; north: number },
 ): TileMapping {
   const mercNorth = latToMercY(fakeBounds.north);
@@ -235,57 +237,83 @@ function lonLatToTile(
   return [x, y];
 }
 
-function coordsToTileLocal(
-  geojson: any, tm: TileMapping,
-): number[][] | number[][][] | null {
-  const t = geojson.type;
-  const c = geojson.coordinates;
+// toFlat is always called with dim 2 here, so coords are xy pairs.
+interface FlatGeometry {
+  type: string;
+  coords: Float64Array;
+  ringOffsets: Int32Array | null;
+  partOffsets: Int32Array | null;
+}
 
-  if (t === 'Point') {
-    const [x, y] = lonLatToTile(c[0], c[1], tm);
-    return [[x, y]];
+// Coordinates [start, end) of the flat buffer, projected to tile-local ints.
+function ringToTileLocal(
+  coords: Float64Array, start: number, end: number, tm: TileMapping,
+): number[][] {
+  const out: number[][] = new Array(end - start);
+  for (let i = start; i < end; i++) {
+    out[i - start] = lonLatToTile(coords[i * 2], coords[i * 2 + 1], tm);
   }
-  if (t === 'MultiPoint') {
-    return c.map((p: number[]) => {
-      const [x, y] = lonLatToTile(p[0], p[1], tm);
-      return [x, y];
-    });
+  return out;
+}
+
+// Rings [ringStart, ringEnd) of ringOffsets, as one polygon's worth.
+function ringsOf(
+  f: FlatGeometry, ringStart: number, ringEnd: number, tm: TileMapping,
+): number[][][] {
+  const ro = f.ringOffsets!;
+  const rings: number[][][] = new Array(ringEnd - ringStart);
+  for (let r = ringStart; r < ringEnd; r++) {
+    rings[r - ringStart] = ringToTileLocal(f.coords, ro[r], ro[r + 1], tm);
   }
-  if (t === 'LineString') {
-    return [c.map((p: number[]) => {
-      const [x, y] = lonLatToTile(p[0], p[1], tm);
-      return [x, y];
-    })];
-  }
-  if (t === 'MultiLineString') {
-    return c.map((line: number[][]) =>
-      line.map((p: number[]) => {
-        const [x, y] = lonLatToTile(p[0], p[1], tm);
-        return [x, y];
-      })
-    );
-  }
-  if (t === 'Polygon') {
-    const rings = c.map((ring: number[][]) =>
-      ring.map((p: number[]) => {
-        const [x, y] = lonLatToTile(p[0], p[1], tm);
-        return [x, y];
-      })
-    );
-    return enforceWindingOrder(rings);
-  }
-  if (t === 'MultiPolygon') {
-    const allRings: number[][][] = [];
-    for (const poly of c) {
-      const polyRings = poly.map((ring: number[][]) =>
-        ring.map((p: number[]) => {
-          const [x, y] = lonLatToTile(p[0], p[1], tm);
-          return [x, y];
-        })
-      );
-      allRings.push(...enforceWindingOrder(polyRings));
+  return rings;
+}
+
+// An empty ring makes vt-pbf write a MoveTo header with no coordinate pairs,
+// which decodes as a stray vertex at the tile corner (verified for both line and
+// polygon features). Empty rings arrive routinely rather than exceptionally:
+// phase2 reduces precision after its last isEmpty guard, so any geometry smaller
+// than a tile unit reaches here collapsed.
+//
+// Polygons also need this for parity with the retired GeoJsonWriter walk, which
+// spelled an empty polygon as zero rings where toFlat always emits the exterior
+// ring. Lines emitted the stray vertex on both walks, so the frozen reference in
+// encode-flat.test.mjs reproduces that bug and deliberately disagrees here.
+function dropEmptyRings(rings: number[][][]): number[][][] {
+  return rings.filter(ring => ring.length > 0);
+}
+
+// The toFlat equivalent of walking parsed GeoJSON coordinates. Offsets carry the
+// structure, so this reads the same shape without the text round trip.
+// Exported for tests/encode-flat.test.mjs, which differentials it against the
+// GeoJSON walk it replaced -- winding order is restructured here and nothing
+// else covers it.
+export function flatToTileLocal(
+  f: FlatGeometry, tm: TileMapping,
+): number[][] | number[][][] | null {
+  const n = f.coords.length / 2;
+
+  switch (f.type) {
+    case 'Point':
+    case 'MultiPoint':
+      return ringToTileLocal(f.coords, 0, n, tm);
+    case 'LineString':
+      return dropEmptyRings([ringToTileLocal(f.coords, 0, n, tm)]);
+    case 'MultiLineString':
+      return dropEmptyRings(ringsOf(f, 0, f.ringOffsets!.length - 1, tm));
+    case 'Polygon':
+      return enforceWindingOrder(dropEmptyRings(ringsOf(f, 0, f.ringOffsets!.length - 1, tm)));
+    case 'MultiPolygon': {
+      // Winding is enforced per polygon, so partOffsets has to drive this --
+      // running it across every ring at once would treat the second polygon's
+      // shell as a hole.
+      const po = f.partOffsets!;
+      const all: number[][][] = [];
+      for (let i = 0; i < po.length - 1; i++) {
+        all.push(...enforceWindingOrder(dropEmptyRings(ringsOf(f, po[i], po[i + 1], tm))));
+      }
+      return all;
     }
-    return allRings;
+    default:
+      return null;
   }
-  return null;
 }

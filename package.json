@@ -11,9 +11,13 @@
     "check": "npm run check --workspaces",
     "serve": "node tests/server.mjs",
     "test": "node tests/proj-test.mjs",
-    "bench": "node tests/bench.mjs"
+    "test:bench": "node --test tests/capture.test.mjs tests/replay-validation.test.mjs tests/replay-structural.test.mjs tests/replay-compare.test.mjs tests/encode-flat.test.mjs tests/pool-lifecycle.test.mjs tests/chain.test.mjs",
+    "bench": "node tests/bench.mjs",
+    "bench:replay": "node tests/bench-replay.mjs",
+    "bench:replay:compare": "node tests/replay-compare.mjs"
   },
   "devDependencies": {
-    "@playwright/test": "^1.59.1"
+    "@playwright/test": "^1.59.1",
+    "mitata": "^1.0.34"
   }
 }

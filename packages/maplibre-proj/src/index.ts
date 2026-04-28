@@ -19,6 +19,8 @@ import {
   transformCoords,
   debugConfig,
   shutdownTileWorkers as shutdownBackprojWorkers,
+  isCaptureEnabled,
+  recordOutputRequest,
 } from 'backproj';
 import type { Transformer, FetchTileFn, TileProcessor } from 'backproj';
 import type { LRUCache } from 'lru-cache';
@@ -223,6 +225,8 @@ export async function reprojectStyle(options: {
   return { style, bounds, maxBounds, transformer, cleanup };
 }
 
+let captureRequestCounter = 0;
+
 function registerVectorProtocol(
   protocolId: string,
   source: any,
@@ -241,6 +245,16 @@ function registerVectorProtocol(
     if (!match) return Promise.reject(new Error(`Cannot parse tile coords from ${url}`));
     const [, zStr, xStr, yStr] = match;
     const z = parseInt(zStr), x = parseInt(xStr), y = parseInt(yStr);
+
+    // Tap B (output-tile request log). Records every MapLibre request,
+    // including those that hit the output cache. The captureRequestId
+    // is unique per request so duplicates of the same (z,x,y) are
+    // distinguishable in the log; tap A in tile-processor uses the
+    // same id as the join key.
+    const captureRequestId = `${z}/${x}/${y}#${captureRequestCounter++}`;
+    if (isCaptureEnabled()) {
+      recordOutputRequest({ requestId: captureRequestId, z, x, y });
+    }
 
     const outputKey = `${z}/${x}/${y}`;
     const cached = outputCache.get(outputKey);
@@ -264,7 +278,7 @@ function registerVectorProtocol(
 
         try {
           const data = await processor.reprojectTile(
-            z, x, y, transformer, fetchTile, cache, abortController.signal,
+            z, x, y, transformer, fetchTile, cache, abortController.signal, captureRequestId,
           );
           if (data.byteLength > 0) {
             outputCache.set(outputKey, data.slice(0));
@@ -285,7 +299,7 @@ function registerVectorProtocol(
   });
 }
 
-export function shutdownTileWorkers(): void {
+export function shutdownTileWorkers(): Promise<void> {
   sharedProcessor = null;
   sharedPoolCRS = null;
   for (const [, entry] of stableProtocols) {
@@ -293,5 +307,5 @@ export function shutdownTileWorkers(): void {
     entry.queue?.clear();
   }
   stableProtocols.clear();
-  shutdownBackprojWorkers();
+  return shutdownBackprojWorkers();
 }

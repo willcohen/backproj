@@ -57,13 +57,16 @@ export interface GroupedFeatures {
   };
 }
 
-export function decodeAndGroupTiles(
-  tiles: { data: ArrayBuffer; coord: TileCoord }[],
+/** Grouping over pre-decoded per-tile feature lists, so a caller that
+ *  caches decodeTile output can share decoded features across calls.
+ *  Consumers must treat the features as immutable: the same geojson
+ *  objects may appear in many groupings. */
+export function groupDecodedFeatures(
+  featureLists: DecodedFeature[][],
 ): GroupedFeatures {
   const groups: GroupedFeatures = {};
 
-  for (const { data, coord } of tiles) {
-    const features = decodeTile(data, coord);
+  for (const features of featureLists) {
     for (const { layerName, featureId, geojson } of features) {
       if (!groups[layerName]) groups[layerName] = {};
       const key = String(featureId);
@@ -73,4 +76,12 @@ export function decodeAndGroupTiles(
   }
 
   return groups;
+}
+
+export function decodeAndGroupTiles(
+  tiles: { data: ArrayBuffer; coord: TileCoord }[],
+): GroupedFeatures {
+  return groupDecodedFeatures(
+    tiles.map(({ data, coord }) => decodeTile(data, coord)),
+  );
 }

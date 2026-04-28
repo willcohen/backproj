@@ -24,6 +24,8 @@ export interface StageStats {
 
 export interface Phase1Detail {
   decodeMs: number;
+  decodeCacheHits: number;
+  decodeCacheMisses: number;
   featureCount: number;
   fragmentCount: number;
   stitchMs: number;
@@ -31,7 +33,7 @@ export interface Phase1Detail {
   densifyMs: number;
   coordExtractMs: number;
   coordsProduced: number;
-  geojsonReadMs: number;
+  constructMs: number;
   preDensifyCoords: number;
   postDensifyCoords: number;
 }
@@ -57,8 +59,6 @@ export interface WorkerProfile {
   phase1Detail: Phase1Detail;
   phase2Ms: number;
   phase2Detail: Phase2Detail;
-  idleBeforePhase1Ms: number;
-  interPhaseIdleMs: number;
 }
 
 export interface TileProfile {
@@ -73,7 +73,9 @@ export interface TileProfile {
   cacheMisses: number;
   transformCoordsMs: number;
   coordCount: number;
-  marshalMs: number;
+  /** Main-thread wall of the one fused chain RPC: queue wait plus
+   *  phase1 + transform + phase2 body. */
+  chainRoundtripMs: number;
   worker: WorkerProfile;
 }
 
@@ -92,8 +94,6 @@ export interface ProfilingReport {
     workerId: number;
     tilesProcessed: number;
     totalActiveMs: number;
-    totalIdleMs: number;
-    utilization: number;
   }[];
   cacheStats: {
     totalFetches: number;
@@ -164,15 +164,13 @@ export function getProfilingData(): ProfilingReport {
     stageBreakdown['phase1'] = avgOf(t => t.worker.phase1Ms) / avgTotal * 100;
     stageBreakdown['transformCoords'] = avgOf(t => t.transformCoordsMs) / avgTotal * 100;
     stageBreakdown['phase2'] = avgOf(t => t.worker.phase2Ms) / avgTotal * 100;
-    stageBreakdown['marshal'] = avgOf(t => t.marshalMs) / avgTotal * 100;
   }
 
-  const workerMap = new Map<number, { active: number; idle: number; count: number }>();
+  const workerMap = new Map<number, { active: number; count: number }>();
   for (const t of tiles) {
     const w = t.worker;
-    const existing = workerMap.get(w.workerId) || { active: 0, idle: 0, count: 0 };
+    const existing = workerMap.get(w.workerId) || { active: 0, count: 0 };
     existing.active += w.phase1Ms + w.phase2Ms;
-    existing.idle += w.idleBeforePhase1Ms + w.interPhaseIdleMs;
     existing.count++;
     workerMap.set(w.workerId, existing);
   }
@@ -180,8 +178,6 @@ export function getProfilingData(): ProfilingReport {
     workerId,
     tilesProcessed: s.count,
     totalActiveMs: s.active,
-    totalIdleMs: s.idle,
-    utilization: s.active / ((s.active + s.idle) || 1),
   }));
 
   let totalFetches = 0, hits = 0, misses = 0;
@@ -246,7 +242,7 @@ export function printProfilingSummary(): void {
       ['stitch', avgOf(t => t.worker.phase1Detail.stitchMs)],
       ['densify', avgOf(t => t.worker.phase1Detail.densifyMs)],
       ['coordExtract', avgOf(t => t.worker.phase1Detail.coordExtractMs)],
-      ['geojsonRead', avgOf(t => t.worker.phase1Detail.geojsonReadMs)],
+      ['construct', avgOf(t => t.worker.phase1Detail.constructMs ?? 0)],
     ];
     p1ops.sort((a, b) => b[1] - a[1]);
     for (const [name, ms] of p1ops) {
@@ -260,7 +256,9 @@ export function printProfilingSummary(): void {
     const avgPreDensify = avgOf(t => t.worker.phase1Detail.preDensifyCoords);
     const avgPostDensify = avgOf(t => t.worker.phase1Detail.postDensifyCoords);
     const ratio = avgPreDensify > 0 ? (avgPostDensify / avgPreDensify).toFixed(1) : 'N/A';
-    lines.push(`  counts: ${Math.round(avgFeatures)} features, ${Math.round(avgFragments)} fragments, ${Math.round(avgStitches)} stitches, ${Math.round(avgCoords)} coords, densify ratio: ${ratio}x`);
+    const decodeHits = tiles.reduce((s, t) => s + (t.worker.phase1Detail.decodeCacheHits ?? 0), 0);
+    const decodeLookups = decodeHits + tiles.reduce((s, t) => s + (t.worker.phase1Detail.decodeCacheMisses ?? 0), 0);
+    lines.push(`  counts: ${Math.round(avgFeatures)} features, ${Math.round(avgFragments)} fragments, ${Math.round(avgStitches)} stitches, ${Math.round(avgCoords)} coords, densify ratio: ${ratio}x, decode cache ${decodeHits}/${decodeLookups} hits`);
     lines.push('');
 
     const avgPhase2 = avgOf(t => t.worker.phase2Ms) || 1;
@@ -302,19 +300,9 @@ export function printProfilingSummary(): void {
   lines.push(`Cache: ${cacheStats.totalFetches} fetches, ${cacheStats.hits} hits (${Math.round(cacheStats.hitRate * 100)}%), ${cacheStats.misses} misses`);
 
   const wLines = workerStats.map(w =>
-    `#${w.workerId} util=${Math.round(w.utilization * 100)}%`
+    `#${w.workerId} ${w.tilesProcessed} tiles ${fmtMs(w.totalActiveMs)}ms`
   );
   lines.push(`Workers: ${wLines.join(', ')}`);
-
-  const avgIdle = report.tiles.length > 0
-    ? report.tiles.reduce((s, t) => s + t.worker.interPhaseIdleMs, 0) / report.tiles.length
-    : 0;
-  const avgTransform = tileSummary.transformCoordsMs.mean;
-  if (avgIdle > avgTransform * 0.5 && report.tiles.length > 2) {
-    lines.push('');
-    lines.push(`NOTE: avg inter-phase idle = ${fmtMs(avgIdle)}ms, avg transformCoords = ${fmtMs(avgTransform)}ms`);
-    lines.push('  -> Main thread coord transform may be the serialization bottleneck.');
-  }
 
   console.log(lines.join('\n'));
 }

@@ -1,10 +1,65 @@
 import { test } from '@playwright/test';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+// The same hashers the replay staleness gate recomputes; importing them
+// keeps producer and gate from drifting apart.
+import { scenarioNameFor, waypointsHashFor } from './lib/fixture-validation.mjs';
 
 const BASE_URL = 'http://localhost:8973';
 const RUNS_PER_SCENARIO = 3;
+
+// Tap A / B / C / D: capture writes a ScenarioFixture per scenario at
+// <BENCH_FIXTURE_ROOT>/<scenario_name>/. Capture is active during run 0
+// only; runs 1..N run with capture disabled to avoid duplicate logs.
+function fixtureRoot(): string {
+  return process.env.BENCH_FIXTURE_ROOT || 'fixtures';
+}
+
+function buildManifest(scenario: Scenario): Record<string, string> {
+  return {
+    scenario_name: scenarioNameFor(scenario.crs),
+    crs: scenario.crs,
+    waypoints_hash: waypointsHashFor(scenario.waypoints),
+    tile_source_url: process.env.BENCH_TILE_SOURCE_URL || '',
+    backproj_version: process.env.BENCH_VERSION_BACKPROJ || '',
+    proj_wasm_version: process.env.BENCH_VERSION_PROJ_WASM || '',
+    wasmts_version: process.env.BENCH_VERSION_WASMTS || '',
+    worker_router_version: process.env.BENCH_VERSION_WORKER_ROUTER || '',
+    maplibre_version: process.env.BENCH_VERSION_MAPLIBRE || '',
+    captured_at: process.env.BENCH_CAPTURED_AT || new Date().toISOString(),
+    captured_commit_sha: process.env.BENCH_GIT_SHA || '',
+    captured_by: process.env.BENCH_CAPTURED_BY || '',
+  };
+}
+
+function writeFixture(scenario: Scenario, capture: { inputRequests: any[]; outputRequests: any[]; tileKeys: string[]; tilesBase64: Record<string, string> }): void {
+  const dir = join(fixtureRoot(), scenarioNameFor(scenario.crs));
+  mkdirSync(dir, { recursive: true });
+
+  // manifest.json
+  const manifest = buildManifest(scenario);
+  writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+
+  // request-log.jsonl (input-tile fetches in order)
+  const inputLines = capture.inputRequests.map((r: any) => JSON.stringify(r)).join('\n');
+  writeFileSync(join(dir, 'request-log.jsonl'), inputLines + (inputLines ? '\n' : ''));
+
+  // output-log.jsonl (MapLibre output requests in order)
+  const outputLines = capture.outputRequests.map((r: any) => JSON.stringify(r)).join('\n');
+  writeFileSync(join(dir, 'output-log.jsonl'), outputLines + (outputLines ? '\n' : ''));
+
+  // tiles/<z>/<x>/<y>.mvt -- byte cache, deduplicated by key.
+  for (const key of capture.tileKeys) {
+    const path = join(dir, 'tiles', key + '.mvt');
+    mkdirSync(dirname(path), { recursive: true });
+    const bytes = Buffer.from(capture.tilesBase64[key], 'base64');
+    writeFileSync(path, bytes);
+  }
+
+  console.log(`--- ${scenario.crs}: fixture written to ${dir}`);
+  console.log(`    output_requests=${capture.outputRequests.length}, input_requests=${capture.inputRequests.length}, tiles=${capture.tileKeys.length}`);
+}
 
 interface Waypoint {
   lon: number;
@@ -62,6 +117,19 @@ test.describe('Benchmark Suite', () => {
         console.error(`[browser page error] ${err.message}`);
       });
 
+      // Redirect CDN-pinned backproj/maplibre-proj to the locally built
+      // bundles so capture taps and any other in-flight changes are
+      // exercised. The published page uses pinned versions; the bench
+      // suite always runs against current source.
+      await page.route(/cdn\.jsdelivr\.net\/npm\/backproj@[^/]+\/dist\/backproj\.mjs/, async route => {
+        const body = readFileSync(join(process.cwd(), 'packages/backproj/dist/backproj.mjs'), 'utf8');
+        await route.fulfill({ status: 200, contentType: 'application/javascript', body });
+      });
+      await page.route(/cdn\.jsdelivr\.net\/npm\/maplibre-proj@[^/]+\/dist\/maplibre-proj\.mjs/, async route => {
+        const body = readFileSync(join(process.cwd(), 'packages/maplibre-proj/dist/maplibre-proj.mjs'), 'utf8');
+        await route.fulfill({ status: 200, contentType: 'application/javascript', body });
+      });
+
       console.log(`--- ${scenario.crs}: navigating to demo page ---`);
       await page.goto(`${BASE_URL}/#profile=1&crs=${scenario.crs}&data=mvt`, {
         waitUntil: 'domcontentloaded',
@@ -70,7 +138,7 @@ test.describe('Benchmark Suite', () => {
       // Wait for PROJ init and map ready
       console.log(`--- ${scenario.crs}: waiting for init ---`);
       await page.waitForFunction(
-        () => window._state?.transformer !== null && window._state?.map !== null,
+        () => window._state != null && window._state.transformer !== null && window._state.map !== null,
         { timeout: 120_000, polling: 1000 },
       );
       console.log(`--- ${scenario.crs}: init complete ---`);
@@ -117,11 +185,20 @@ test.describe('Benchmark Suite', () => {
           }));
         }
 
-        // Clear profiling, ensure enabled
-        await page.evaluate(() => {
+        // Clear profiling, ensure enabled. Enable capture on run 0 only;
+        // disable it for runs 1..N so the fixture reflects exactly one
+        // pass through the scenario (no duplicate request log entries).
+        const captureThisRun = run === 0;
+        await page.evaluate((captureOn: boolean) => {
           window.clearProfilingData();
           window.enableProfiling();
-        });
+          if (captureOn) {
+            window.enableCapture({});
+          } else {
+            window.disableCapture();
+            window.clearCapture();
+          }
+        }, captureThisRun);
 
         // Reset viewport to area-of-use
         await page.evaluate(() => {
@@ -167,6 +244,15 @@ test.describe('Benchmark Suite', () => {
         const reportJson = await page.evaluate(() => window.exportProfilingJSON());
         medianReports.push(reportJson);
         console.log(`  run ${run + 1} complete, ${JSON.parse(reportJson).tileSummary.count} tiles`);
+
+        // After run 0, extract the capture snapshot and write the
+        // ScenarioFixture to disk. Disable capture so subsequent runs
+        // don't accumulate duplicate state.
+        if (captureThisRun) {
+          const snapshot = await page.evaluate(() => window.exportCapture());
+          await page.evaluate(() => { window.disableCapture(); window.clearCapture(); });
+          writeFixture(scenario, snapshot);
+        }
       }
 
       // Pick median run by p50 total
@@ -200,5 +286,14 @@ declare global {
     enableProfiling: () => void;
     transformCoords: (coords: [number, number][], transformer: any) => Promise<number[][]>;
     updateMap: (crs: string) => Promise<void>;
+    enableCapture: (opts: { sceneStartMs?: number }) => void;
+    disableCapture: () => void;
+    clearCapture: () => void;
+    exportCapture: () => {
+      inputRequests: any[];
+      outputRequests: any[];
+      tileKeys: string[];
+      tilesBase64: Record<string, string>;
+    };
   }
 }

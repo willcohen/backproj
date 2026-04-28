@@ -1,49 +1,69 @@
 #!/usr/bin/env node
 
+// bench.mjs -- live-network run against a real tile server.
+//
+// This exercises the one path the offline replay cannot: real fetches over the
+// network, against whatever the upstream tile server currently serves. Treat it
+// as an integration check.
+//
+// It deliberately does NOT gate on timings. Network variance dwarfs anything
+// worth measuring here, and a developer box benchmarks the same code 13-25%
+// apart on its own. For performance work use the offline replay, which pins the
+// input bytes:
+//
+//   npm run bench:replay          -- reproducible, fixture-backed
+//   npm run bench:replay:compare  -- build-vs-build, mirrored and paired
+//
+// Capture (tests/benchmark.spec.ts) is what turns a live run into those
+// fixtures.
+
 import { execSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { compare } from './compare.mjs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { hostname } from 'node:os';
+import { TILE_SOURCE_URL_DEFAULT } from './lib/fixture-validation.mjs';
+
+const FIXTURE_ROOT_DEFAULT = 'fixtures';
+
+function readPackageVersion(pkgPath) {
+  try {
+    const p = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    return p.version || '';
+  } catch {
+    return '';
+  }
+}
+
+function gatherVersions(cwd) {
+  return {
+    backproj_version: readPackageVersion(join(cwd, 'packages/backproj/package.json')),
+    proj_wasm_version: readPackageVersion(join(cwd, 'node_modules/proj-wasm/package.json')),
+    wasmts_version: readPackageVersion(join(cwd, 'node_modules/@wcohen/wasmts/package.json')),
+    maplibre_version: readPackageVersion(join(cwd, 'node_modules/maplibre-gl/package.json')),
+    // backproj depends on worker-router directly via the joint-pool wiring
+    // (tile-processor builds the pool with both proj + wasmts handlers).
+    worker_router_version: readPackageVersion(join(cwd, 'node_modules/worker-router/package.json')) || 'n/a',
+  };
+}
 
 const args = process.argv.slice(2);
 
 function usage() {
   console.log(`Usage:
-  node tests/bench.mjs                              Run suite, save results
-  node tests/bench.mjs --baseline <dir>             Run suite + compare against baseline
-  node tests/bench.mjs --compare <dir-a> <dir-b>    Compare two result dirs only
-  node tests/bench.mjs --scenario <CRS>             Run single scenario (e.g. EPSG:2249)
+  node tests/bench.mjs                    Live-network run against a real tile server
+  node tests/bench.mjs --scenario <CRS>   Single scenario (e.g. EPSG:2249)
+
+Saves results and exits 0. Does not gate on timings; see the header.
 `);
   process.exit(1);
 }
 
-function findLatestResults() {
-  const resultsRoot = join(process.cwd(), 'results');
-  if (!existsSync(resultsRoot)) return null;
-  const dirs = readdirSync(resultsRoot)
-    .filter(d => d.startsWith('bench-'))
-    .sort()
-    .reverse();
-  return dirs.length > 0 ? join(resultsRoot, dirs[0]) : null;
-}
-
-// --compare mode: no Playwright, just diff two dirs
-if (args[0] === '--compare') {
-  if (args.length !== 3) usage();
-  const code = compare(resolve(args[1]), resolve(args[2]));
-  process.exit(code);
-}
-
-// Parse flags
-let baselineDir = null;
 let scenarioFilter = null;
 const remaining = [...args];
 
 while (remaining.length > 0) {
   const flag = remaining.shift();
-  if (flag === '--baseline') {
-    baselineDir = resolve(remaining.shift());
-  } else if (flag === '--scenario') {
+  if (flag === '--scenario') {
     scenarioFilter = remaining.shift();
   } else {
     console.error(`Unknown flag: ${flag}`);
@@ -51,7 +71,6 @@ while (remaining.length > 0) {
   }
 }
 
-// Build packages first
 console.log('Building packages...');
 try {
   execSync('npm run build:dev --workspaces', { stdio: 'inherit', cwd: process.cwd() });
@@ -60,16 +79,31 @@ try {
   process.exit(1);
 }
 
-// Run Playwright benchmarks
 console.log('');
 console.log('Running benchmarks...');
 const env = { ...process.env };
 
-// Use a consistent results dir for this run
 const sha = execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+const fullSha = (() => {
+  try { return execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim(); }
+  catch { return sha; }
+})();
 const date = new Date().toISOString().slice(0, 10);
 const resultsDir = join(process.cwd(), 'results', `bench-${date}-${sha}`);
 env.BENCH_RESULTS_DIR = resultsDir;
+
+// waypoints_hash is computed in benchmark.spec.ts, which reads scenarios.json.
+const versions = gatherVersions(process.cwd());
+env.BENCH_FIXTURE_ROOT = process.env.BENCH_FIXTURE_ROOT || FIXTURE_ROOT_DEFAULT;
+env.BENCH_TILE_SOURCE_URL = process.env.BENCH_TILE_SOURCE_URL || TILE_SOURCE_URL_DEFAULT;
+env.BENCH_VERSION_BACKPROJ = versions.backproj_version;
+env.BENCH_VERSION_PROJ_WASM = versions.proj_wasm_version;
+env.BENCH_VERSION_WASMTS = versions.wasmts_version;
+env.BENCH_VERSION_WORKER_ROUTER = versions.worker_router_version;
+env.BENCH_VERSION_MAPLIBRE = versions.maplibre_version;
+env.BENCH_GIT_SHA = fullSha;
+env.BENCH_CAPTURED_BY = hostname();
+env.BENCH_CAPTURED_AT = new Date().toISOString();
 
 let pwArgs = 'npx playwright test tests/benchmark.spec.ts --reporter=list';
 if (scenarioFilter) {
@@ -85,10 +119,3 @@ try {
 
 console.log('');
 console.log(`Results saved to: ${resultsDir}`);
-
-// Compare if --baseline provided
-if (baselineDir) {
-  console.log('');
-  const code = compare(baselineDir, resultsDir);
-  process.exit(code);
-}
