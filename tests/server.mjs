@@ -77,6 +77,20 @@ const server = createServer(async (req, res) => {
         .replace(
           /https:\/\/cdn\.jsdelivr\.net\/npm\/lru-cache@[^/]+\/dist\/esm\/index\.js/g,
           '/node_modules/lru-cache/dist/esm/index.js',
+        )
+        .replace(
+          /https:\/\/cdn\.jsdelivr\.net\/npm\/ffi-wasm@[^/]+\//g,
+          '/node_modules/ffi-wasm/',
+        )
+        // The npm alias installs @wcohen/worker-router at
+        // node_modules/worker-router, so the local dir drops the scope.
+        .replace(
+          /https:\/\/cdn\.jsdelivr\.net\/npm\/@wcohen\/worker-router@[^/]+\//g,
+          '/node_modules/worker-router/',
+        )
+        .replace(
+          /https:\/\/cdn\.jsdelivr\.net\/npm\/comlink@[^/]+\//g,
+          '/node_modules/comlink/',
         );
 
       // Inject local importmap additions (clj-native/*, worker-router,
