@@ -1,5 +1,10 @@
 # Change Log
 
+## [Unreleased]
+
+### Changed
+- The worker decode cache is budgeted by input bytes instead of entry count
+
 ## [0.0.5] - 2026-08-26
 
 ### Added

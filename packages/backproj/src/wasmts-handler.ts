@@ -72,14 +72,17 @@ let projHandler: any = null;
  * an FNV-1a hash and re-decode on mismatch. Cached features are shared
  * across chain calls: everything downstream reads them without
  * mutating (see groupDecodedFeatures).
+ *
+ * Budgeted by input bytes; decoded output runs ~10x the PBF.
  */
-const DECODE_CACHE_MAX = 16;
+const DECODE_CACHE_MAX_BYTES = 2 * 1024 * 1024;
 interface DecodeCacheEntry {
   byteLength: number;
   hash: number;
   features: DecodedFeature[];
 }
 const decodeCache = new Map<string, DecodeCacheEntry>();
+let decodeCacheBytes = 0;
 
 function fnv1a(bytes: Uint8Array): number {
   let h = 0x811c9dc5;
@@ -106,10 +109,17 @@ function decodedFeaturesFor(
     return entry.features;
   }
   const features = decodeTile(data, coord);
-  decodeCache.delete(key);
+  const stale = decodeCache.get(key);
+  if (stale) {
+    decodeCache.delete(key);
+    decodeCacheBytes -= stale.byteLength;
+  }
   decodeCache.set(key, { byteLength: bytes.length, hash, features });
-  if (decodeCache.size > DECODE_CACHE_MAX) {
-    decodeCache.delete(decodeCache.keys().next().value!);
+  decodeCacheBytes += bytes.length;
+  while (decodeCacheBytes > DECODE_CACHE_MAX_BYTES && decodeCache.size > 1) {
+    const oldestKey = decodeCache.keys().next().value!;
+    decodeCacheBytes -= decodeCache.get(oldestKey)!.byteLength;
+    decodeCache.delete(oldestKey);
   }
   counts.misses++;
   return features;
