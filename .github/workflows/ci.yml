@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 22 is the oldest supported line; 24 tracks current LTS.
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # Builds and type-checks both workspaces (backproj, maplibre-proj).
+      - run: npm run build
+      - run: npm run check
+      # Pure-Node suites: proj round trips, capture/replay validation,
+      # encode parity, pool lifecycle, and the fused chain end to end.
+      # The Playwright replay bench stays local; it needs a browser and
+      # a captured fixture.
+      - run: npm test
+      - run: npm run test:bench
