@@ -4,6 +4,9 @@
 
 ### Changed
 - The worker decode cache is budgeted by input bytes instead of entry count
+- `proj-wasm` 0.1.0-alpha11 and `ffi-wasm` 0.0.2, pinned exactly. semver sorts
+  `0.1.0-alpha11` before `0.1.0-alpha9`, so a caret range resolves to alpha9
+- `@wcohen/wasmts` ^0.1.0-alpha7
 
 ## [0.0.5] - 2026-08-26
 

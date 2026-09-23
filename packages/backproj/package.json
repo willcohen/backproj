@@ -24,11 +24,11 @@
   },
   "dependencies": {
     "@mapbox/vector-tile": "^2.0.4",
-    "@wcohen/wasmts": "^0.1.0-alpha6",
-    "ffi-wasm": "0.0.1",
+    "@wcohen/wasmts": "^0.1.0-alpha7",
+    "ffi-wasm": "0.0.2",
     "lru-cache": "^11.2.6",
     "pbf": "^4.0.1",
-    "proj-wasm": "^0.1.0-alpha9",
+    "proj-wasm": "0.1.0-alpha11",
     "vt-pbf": "^3.1.3",
     "worker-router": "npm:@wcohen/worker-router@^0.0.2"
   },

@@ -21,11 +21,11 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@wcohen/wasmts": "^0.1.0-alpha6",
+    "@wcohen/wasmts": "^0.1.0-alpha7",
     "backproj": ">=0.0.5"
   },
   "peerDependencies": {
-    "@wcohen/wasmts": ">=0.1.0-alpha6",
+    "@wcohen/wasmts": ">=0.1.0-alpha7",
     "maplibre-gl": ">=5.0.0"
   },
   "devDependencies": {
