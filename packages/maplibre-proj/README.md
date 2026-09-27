@@ -61,6 +61,11 @@ const { style, bounds, transformer } = await reprojectStyle({
 });
 ```
 
+A call that starts the tile worker pool (the first call with a vector
+tile source, or the first such call after `shutdownTileWorkers()`)
+ignores `transformer` and builds a new one: starting the pool
+invalidates transformers built before it.
+
 ### Vector tiles
 
 Vector tile sources in the style are automatically handled. The source's

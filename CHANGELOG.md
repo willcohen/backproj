@@ -8,6 +8,12 @@
   `0.1.0-alpha11` before `0.1.0-alpha9`, so a caret range resolves to alpha9
 - `@wcohen/wasmts` ^0.1.0-alpha7
 
+### Fixed
+- maplibre-proj: the first `reprojectStyle` of a page could trap in proj-wasm
+  ("memory access out of bounds") when proj-wasm already ran on its own pool.
+  `reprojectStyle` now starts the tile workers before it builds the
+  transformer, and a call that starts them ignores a passed `transformer`
+
 ## [0.0.5] - 2026-08-26
 
 ### Added

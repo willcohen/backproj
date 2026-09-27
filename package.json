@@ -12,6 +12,7 @@
     "serve": "node tests/server.mjs",
     "test": "node tests/proj-test.mjs",
     "test:bench": "node --test tests/capture.test.mjs tests/replay-validation.test.mjs tests/replay-structural.test.mjs tests/replay-compare.test.mjs tests/encode-flat.test.mjs tests/pool-lifecycle.test.mjs tests/chain.test.mjs",
+    "test:first-reproject": "node --test --test-force-exit tests/first-reproject.test.mjs",
     "bench": "node tests/bench.mjs",
     "bench:replay": "node tests/bench-replay.mjs",
     "bench:replay:compare": "node tests/replay-compare.mjs"

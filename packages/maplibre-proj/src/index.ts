@@ -55,8 +55,20 @@ export async function reprojectStyle(options: {
   const { crs } = options;
   const style: StyleSpecification = JSON.parse(JSON.stringify(options.style));
 
+  // createTileProcessor moves proj-wasm onto the tile pool and terminates the
+  // pool proj-wasm started on. A transformer built before that move holds PJ
+  // pointers into the dead heap, and a call with it traps on a tile worker.
+  // So the tile processor comes first, and the call that creates it builds a
+  // new transformer even when the caller passed one.
+  const hasVectorTiles = Object.values(style.sources)
+    .some((source) => source.type === 'vector' && !!source.tiles);
+  const createsProcessor = hasVectorTiles && !sharedProcessor;
+  const processor = hasVectorTiles
+    ? (sharedProcessor ??= await createTileProcessor())
+    : null;
+
   let transformer: Transformer;
-  if (options.transformer) {
+  if (options.transformer && !createsProcessor) {
     transformer = options.transformer;
   } else {
     await initProj();
@@ -74,16 +86,13 @@ export async function reprojectStyle(options: {
       }
     }
 
-    if (source.type === 'vector' && source.tiles) {
-      if (!sharedProcessor) {
-        sharedProcessor = await createTileProcessor();
-      }
+    if (source.type === 'vector' && source.tiles && processor) {
       if (sharedPoolCRS !== crs) {
         const poolSize = typeof navigator !== 'undefined'
           ? (navigator.hardwareConcurrency || 4)
           : 4;
         const tPool = await buildTransformerPool(crs, poolSize);
-        sharedProcessor.setTransformerPool(tPool);
+        processor.setTransformerPool(tPool);
         sharedPoolCRS = crs;
       }
 
@@ -102,9 +111,9 @@ export async function reprojectStyle(options: {
         }
         protocolId = `reproj-${Date.now()}-${name}`;
         cache = createTileCache();
-        const queue = new TileQueue(sharedProcessor.poolSize);
+        const queue = new TileQueue(processor.poolSize);
         registerVectorProtocol(
-          protocolId, source, transformer, sharedProcessor, cache, queue,
+          protocolId, source, transformer, processor, cache, queue,
         );
         stableProtocols.set(name, { protocolId, cache, crs, queue });
       }
