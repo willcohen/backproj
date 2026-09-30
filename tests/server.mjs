@@ -41,9 +41,7 @@ const server = createServer(async (req, res) => {
     // HTML. The published demo pulls from jsdelivr; running locally, you
     // want to exercise the current source. CommonJS deps (pbf, vt-pbf,
     // @mapbox/vector-tile) stay on esm.sh because the local node_modules
-    // tree doesn't ship ESM versions. Additional entries (clj-native/*,
-    // worker-router, comlink) extend the importmap with bare specifiers
-    // that proj-wasm and backproj transitively need.
+    // tree doesn't ship ESM versions.
     if (ext === '.html') {
       let text = data.toString('utf8')
         .replace(
@@ -93,19 +91,11 @@ const server = createServer(async (req, res) => {
           '/node_modules/comlink/',
         );
 
-      // Inject local importmap additions (clj-native/*, worker-router,
-      // proj-wasm/proj-handler) into any importmap whose entries weren't
-      // already extended. The published demo importmap doesn't list these
-      // because they're internal transitive deps. Only inject when an
-      // importmap is present.
+      // Inject local importmap additions into an importmap that does not
+      // list them, such as proj-wasm/proj-handler, an internal entry.
       const IMPORTMAP_INJECTIONS = {
         'proj-wasm/proj-handler': '/node_modules/proj-wasm/dist/proj-handler.mjs',
-        'ffi-wasm': '/node_modules/ffi-wasm/src/cljc/net/willcohen/native/handler_runtime.mjs',
-        'ffi-wasm/handler-runtime': '/node_modules/ffi-wasm/src/cljc/net/willcohen/native/handler_runtime.mjs',
-        'ffi-wasm/pool': '/node_modules/ffi-wasm/src/cljc/net/willcohen/native/pool.mjs',
-        'ffi-wasm/workload-pool': '/node_modules/ffi-wasm/src/cljc/net/willcohen/native/workload_pool.mjs',
-        'ffi-wasm/dispatch': '/node_modules/ffi-wasm/src/cljc/net/willcohen/native/dispatch.mjs',
-        'ffi-wasm/platform-state': '/node_modules/ffi-wasm/src/cljc/net/willcohen/native/platform_state.mjs',
+        'ffi-wasm': '/node_modules/ffi-wasm/dist/ffi-wasm.mjs',
         'comlink': '/node_modules/comlink/dist/esm/comlink.mjs',
         'worker-router': '/node_modules/worker-router/dist/index.mjs',
         'worker-router/worker-bootstrap': '/node_modules/worker-router/dist/worker-bootstrap.mjs',

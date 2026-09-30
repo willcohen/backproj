@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   createTileProcessor, shutdownTileWorkers, buildTransformer, transformCoords,
 } from '../packages/backproj/dist/backproj.mjs';
-import { worker_call } from 'ffi-wasm/pool';
+import { worker_call } from 'ffi-wasm';
 
 // A fresh transformer + one forward transform. Routes through the proj
 // handler on the joint pool: finite output proves proj-wasm adopted the

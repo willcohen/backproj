@@ -1,7 +1,8 @@
 /** false in prod builds; esbuild eliminates guarded branches. */
 declare const __DEV__: boolean;
 
-declare module 'ffi-wasm/handler-runtime' {
+/** The worker bundle of ffi-wasm. */
+declare module 'ffi-wasm/handler' {
   export function makeHandler(spec: {
     init: (initArgs: any) => Promise<any> | any;
     fingerprint?: (initArgs: any) => string;
@@ -18,7 +19,13 @@ declare module 'ffi-wasm/handler-runtime' {
   export default _default;
 }
 
-declare module 'ffi-wasm/workload-pool' {
+/** The page bundle of ffi-wasm. */
+declare module 'ffi-wasm' {
+  export function worker_call(
+    pool: any, handlerKey: string, methodName: string,
+    args: any, workerIdx?: number | null,
+  ): Promise<any>;
+  export function pool_size(pool: any): number;
   /** Joint-pool wiring (clj-native workload-pool, CLJS half). The
    *  wiring's atoms belong to ffi-wasm's own squint-cljs instance, so
    *  TS must read the pool through wiring_pool, never by touching the
@@ -38,12 +45,4 @@ declare module 'ffi-wasm/workload-pool' {
   }): Promise<any>;
   export function wiring_pool(wiring: any): any;
   export function shutdown_wiring_BANG_(wiring: any): Promise<any>;
-}
-
-declare module 'ffi-wasm/pool' {
-  export function worker_call(
-    pool: any, handlerKey: string, methodName: string,
-    args: any, workerIdx?: number | null,
-  ): Promise<any>;
-  export function pool_size(pool: any): number;
 }

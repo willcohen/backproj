@@ -12,7 +12,9 @@ let instance = null;
 export default async function create(init) {
   realModule = await import(/* @vite-ignore */ init.projHandlerUrl);
   const make = realModule.default ?? realModule.handler ?? realModule.create;
-  instance = await make(init.projArgs);
+  // init-pool! puts the ffi-wasm URL on the init of this module, and proj's
+  // handler reads it from its own init.
+  instance = await make({ ...init.projArgs, ffiWasmHandlerUrl: init.ffiWasmHandlerUrl });
   return instance;
 }
 

@@ -54,11 +54,11 @@ import type { WorkerProfile } from './profiling.js';
 import {
   isCaptureEnabled, recordInputRequest, recordTileBytes,
 } from './capture.js';
-import { worker_call, pool_size } from 'ffi-wasm/pool';
 import {
+  worker_call, pool_size,
   register_handler_BANG_, make_wiring_BANG_, ensure_wired_BANG_,
   wiring_pool, shutdown_wiring_BANG_,
-} from 'ffi-wasm/workload-pool';
+} from 'ffi-wasm';
 import { handlerSpec, handlerDefaultInitArgs } from 'proj-wasm';
 
 export interface TileProcessor {

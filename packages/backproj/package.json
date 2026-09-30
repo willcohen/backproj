@@ -27,19 +27,18 @@
     "!dist/tsconfig.tsbuildinfo"
   ],
   "scripts": {
-    "build": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --external:proj-wasm --external:@mapbox/vector-tile --external:pbf --external:vt-pbf --external:@wcohen/wasmts --external:lru-cache --external:ffi-wasm --external:worker-router --external:node:* --define:__DEV__=false --minify --sourcemap --outfile=dist/backproj.mjs && esbuild src/wasmts-handler.ts --bundle --format=esm --external:@wcohen/wasmts --define:__DEV__=false --minify --sourcemap --outfile=dist/wasmts-handler.mjs && esbuild src/proj-handler-bridge.mjs --format=esm --outfile=dist/proj-handler-bridge.mjs && tsc --build",
-    "build:dev": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --external:proj-wasm --external:@mapbox/vector-tile --external:pbf --external:vt-pbf --external:@wcohen/wasmts --external:lru-cache --external:ffi-wasm --external:worker-router --external:node:* --define:__DEV__=true --sourcemap --outfile=dist/backproj.mjs && esbuild src/wasmts-handler.ts --bundle --format=esm --external:@wcohen/wasmts --define:__DEV__=true --sourcemap --outfile=dist/wasmts-handler.mjs && esbuild src/proj-handler-bridge.mjs --format=esm --outfile=dist/proj-handler-bridge.mjs && tsc --build",
+    "build": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --external:proj-wasm --external:@mapbox/vector-tile --external:pbf --external:vt-pbf --external:@wcohen/wasmts --external:lru-cache --external:ffi-wasm --external:node:* --define:__DEV__=false --minify --sourcemap --outfile=dist/backproj.mjs && esbuild src/wasmts-handler.ts --bundle --format=esm --external:@wcohen/wasmts --define:__DEV__=false --minify --sourcemap --outfile=dist/wasmts-handler.mjs && esbuild src/proj-handler-bridge.mjs --format=esm --outfile=dist/proj-handler-bridge.mjs && tsc --build",
+    "build:dev": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --external:proj-wasm --external:@mapbox/vector-tile --external:pbf --external:vt-pbf --external:@wcohen/wasmts --external:lru-cache --external:ffi-wasm --external:node:* --define:__DEV__=true --sourcemap --outfile=dist/backproj.mjs && esbuild src/wasmts-handler.ts --bundle --format=esm --external:@wcohen/wasmts --define:__DEV__=true --sourcemap --outfile=dist/wasmts-handler.mjs && esbuild src/proj-handler-bridge.mjs --format=esm --outfile=dist/proj-handler-bridge.mjs && tsc --build",
     "check": "tsc --noEmit"
   },
   "dependencies": {
     "@mapbox/vector-tile": "^2.0.4",
     "@wcohen/wasmts": "^0.1.0-alpha7",
-    "ffi-wasm": "0.0.2",
+    "ffi-wasm": "0.0.3",
     "lru-cache": "^11.2.6",
     "pbf": "^4.0.1",
-    "proj-wasm": "0.1.0-alpha11",
-    "vt-pbf": "^3.1.3",
-    "worker-router": "npm:@wcohen/worker-router@^0.0.2"
+    "proj-wasm": "0.1.0",
+    "vt-pbf": "^3.1.3"
   },
   "devDependencies": {
     "@types/geojson": "^7946.0.16",

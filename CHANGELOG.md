@@ -4,6 +4,11 @@ conventions of [keepachangelog.com](http://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** needs ffi-wasm 0.0.3 and proj-wasm 0.1.0. A page maps only
+  `ffi-wasm`, not its subpaths.
+- Each wasmts worker loads one copy of the ffi-wasm handler runtime.
+
 ### Fixed
 - npm packages link to the repository and issues.
 

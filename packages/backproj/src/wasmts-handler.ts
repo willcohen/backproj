@@ -28,7 +28,7 @@ import {
 } from './mvt-pipeline.js';
 import type { OutputLayers } from './mvt-pipeline.js';
 import type { TileCoord } from './tiling.js';
-import { makeHandler, byteLengthFingerprint } from 'ffi-wasm/handler-runtime';
+import type * as FfiHandler from 'ffi-wasm/handler';
 
 declare const __DEV__: boolean;
 
@@ -185,8 +185,6 @@ async function init(args: InitArgs): Promise<void> {
     if (restoreFetch) restoreFetch();
   }
 }
-
-const fingerprint = byteLengthFingerprint(['wasmtsJsUrl', 'wasmtsWasmBinary'], 'wasmts');
 
 interface SetConfigArgs {
   profilingEnabled?: boolean;
@@ -484,11 +482,26 @@ function runPhase2(
 // init/setConfig run before any busy work; chain is the only busy method.
 const busyMethods = ['chain'];
 
-const create = makeHandler({
-  init,
-  methods,
-  busyMethods,
-  fingerprint,
-});
+// A module worker ignores the page importmap, so the handler runtime loads
+// from the URL that init-pool! puts in the init args. The proj handler in the
+// same worker loads that URL too, so the two share one runtime.
+const loadFactory = async (initArgs: any) => {
+  const ffi: typeof FfiHandler =
+    await import(/* @vite-ignore */ initArgs?.ffiWasmHandlerUrl ?? 'ffi-wasm/handler');
+  return ffi.makeHandler({
+    init,
+    methods,
+    busyMethods,
+    fingerprint: ffi.byteLengthFingerprint(['wasmtsJsUrl', 'wasmtsWasmBinary'], 'wasmts'),
+  });
+};
+
+let factory: ReturnType<typeof loadFactory> | null = null;
+
+const create = async (initArgs?: any) => {
+  // A failed import clears the memo, so a later create can retry.
+  factory ??= loadFactory(initArgs).catch((e) => { factory = null; throw e; });
+  return (await factory)(initArgs);
+};
 
 export default create;
