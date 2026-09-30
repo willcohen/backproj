@@ -4,6 +4,8 @@ conventions of [keepachangelog.com](http://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.0.6] - 2026-09-30
+
 ### Changed
 - The worker decode cache has a byte budget. Before, it had an entry count.
 - `proj-wasm` 0.1.0-alpha11 and `ffi-wasm` 0.0.2, pinned exactly. semver sorts
@@ -119,7 +121,8 @@ conventions of [keepachangelog.com](http://keepachangelog.com/).
 - A demo page (`docs/index.html`) with a CRS picker and GeoJSON layer
   controls.
 
-[Unreleased]: https://github.com/willcohen/backproj/compare/0.0.5...HEAD
+[Unreleased]: https://github.com/willcohen/backproj/compare/0.0.6...HEAD
+[0.0.6]: https://github.com/willcohen/backproj/compare/0.0.5...0.0.6
 [0.0.5]: https://github.com/willcohen/backproj/compare/0.0.4...0.0.5
 [0.0.4]: https://github.com/willcohen/backproj/compare/0.0.3...0.0.4
 [0.0.3]: https://github.com/willcohen/backproj/compare/0.0.2...0.0.3

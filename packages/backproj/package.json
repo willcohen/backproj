@@ -1,6 +1,6 @@
 {
   "name": "backproj",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Reproject coordinates through any CRS via proj-wasm",
   "type": "module",
   "main": "dist/backproj.mjs",

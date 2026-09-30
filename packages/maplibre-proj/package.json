@@ -1,6 +1,6 @@
 {
   "name": "maplibre-proj",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Any projection in MapLibre GL JS via backproj",
   "type": "module",
   "main": "dist/maplibre-proj.mjs",
@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@wcohen/wasmts": "^0.1.0-alpha7",
-    "backproj": ">=0.0.5"
+    "backproj": ">=0.0.6"
   },
   "peerDependencies": {
     "@wcohen/wasmts": ">=0.1.0-alpha7",
