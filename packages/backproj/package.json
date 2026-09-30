@@ -2,6 +2,15 @@
   "name": "backproj",
   "version": "0.0.6",
   "description": "Reproject coordinates through any CRS via proj-wasm",
+  "homepage": "https://github.com/willcohen/backproj#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/willcohen/backproj.git",
+    "directory": "packages/backproj"
+  },
+  "bugs": {
+    "url": "https://github.com/willcohen/backproj/issues"
+  },
   "type": "module",
   "main": "dist/backproj.mjs",
   "module": "dist/backproj.mjs",

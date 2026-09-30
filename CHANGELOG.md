@@ -4,6 +4,9 @@ conventions of [keepachangelog.com](http://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+- npm packages link to the repository and issues.
+
 ## [0.0.6] - 2026-09-30
 
 ### Changed

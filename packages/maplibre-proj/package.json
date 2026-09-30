@@ -2,6 +2,15 @@
   "name": "maplibre-proj",
   "version": "0.0.6",
   "description": "Any projection in MapLibre GL JS via backproj",
+  "homepage": "https://github.com/willcohen/backproj#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/willcohen/backproj.git",
+    "directory": "packages/maplibre-proj"
+  },
+  "bugs": {
+    "url": "https://github.com/willcohen/backproj/issues"
+  },
   "type": "module",
   "main": "dist/maplibre-proj.mjs",
   "module": "dist/maplibre-proj.mjs",
