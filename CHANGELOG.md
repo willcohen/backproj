@@ -1,131 +1,127 @@
 # Change Log
+This file documents notable changes to this project. This change log uses the
+conventions of [keepachangelog.com](http://keepachangelog.com/).
 
 ## [Unreleased]
 
 ### Changed
-- The worker decode cache is budgeted by input bytes instead of entry count
+- The worker decode cache has a byte budget. Before, it had an entry count.
 - `proj-wasm` 0.1.0-alpha11 and `ffi-wasm` 0.0.2, pinned exactly. semver sorts
-  `0.1.0-alpha11` before `0.1.0-alpha9`, so a caret range resolves to alpha9
-- `@wcohen/wasmts` ^0.1.0-alpha7
+  `0.1.0-alpha11` before `0.1.0-alpha9`, so a caret range resolves to alpha9.
+- `@wcohen/wasmts` ^0.1.0-alpha7.
 
 ### Fixed
 - maplibre-proj: the first `reprojectStyle` of a page could trap in proj-wasm
   ("memory access out of bounds") when proj-wasm already ran on its own pool.
   `reprojectStyle` now starts the tile workers before it builds the
-  transformer, and a call that starts them ignores a passed `transformer`
+  transformer, and a call that starts them ignores a passed `transformer`.
 
 ## [0.0.5] - 2026-08-26
 
 ### Added
-- Bench capture / replay. `npm run bench` writes a pinned fixture,
-  `npm run bench:replay` replays it offline. Capture taps exported
-  from `backproj`, off by default
+- Bench capture and replay. `npm run bench` writes a fixture, and
+  `npm run bench:replay` replays it offline. `backproj` exports the capture
+  taps, which are off by default.
 
 ### Changed
-- **Breaking.** One worker pool hosts the wasmts and proj handlers,
-  and a tile's phase1, transform, and phase2 run on that worker as one
-  fused call. `backproj/tile-worker` is replaced by
-  `backproj/wasmts-handler`, and `TileProcessor.cleanupRequest` is
-  gone
-- **Breaking.** `@wcohen/wasmts` moves from a peer dependency to a
-  dependency (`^0.1.0-alpha6`). Flat construction replaces the GeoJSON
-  text round trips
-- `proj-wasm` `^0.1.0-alpha9`. New dependencies `ffi-wasm` and
-  worker-router
-- `createTileProcessor` accepts an options map
-  (`{wasmtsUrl?, poolSize?}`), and `reprojectTile` an optional
-  `outputRequestId`
-- `shutdown()` and `shutdownTileWorkers()` return a promise that
-  resolves when teardown completes
-- `createTileProcessor` initializes proj-wasm onto the joint pool:
-  create the processor first, build transformers after, and skip
-  `initProj`. A bare `initProj()` first is detected and re-initialized
-  onto the pool; transformers built before the processor must be
-  rebuilt
-- Each worker keeps a small LRU of decoded input tiles
+- **Breaking.** One worker pool hosts the wasmts and proj handlers, and each
+  tile runs phase 1, the transform and phase 2 as one call on one worker.
+  `backproj/wasmts-handler` replaces `backproj/tile-worker`, and
+  `TileProcessor.cleanupRequest` is removed.
+- **Breaking.** `@wcohen/wasmts` (`^0.1.0-alpha6`) moves from the peer
+  dependencies to the dependencies. Geometry goes to wasmts through flat
+  construction, with no GeoJSON text round trip.
+- `proj-wasm` ^0.1.0-alpha9, with the new dependencies `ffi-wasm` and
+  `worker-router`.
+- `createTileProcessor` takes an options map (`{wasmtsUrl?, poolSize?}`), and
+  `reprojectTile` takes an optional `outputRequestId`.
+- `shutdown()` and `shutdownTileWorkers()` return a promise that resolves when
+  the teardown is complete.
+- `createTileProcessor` starts proj-wasm on the shared pool. Create the
+  processor first, and build the transformers after it. An earlier
+  `initProj()` moves onto the pool, and a transformer built before the
+  processor must be built again.
+- Each worker keeps a small LRU cache of decoded input tiles.
 
 ### Removed
-- The COI service worker and its README license note. proj-wasm
-  0.1.0-alpha9 is single-threaded, so the demo needs no isolation
-  headers
+- The COI service worker. proj-wasm 0.1.0-alpha9 is single-threaded, so the
+  demo needs no isolation headers.
 
 ## [0.0.4] - 2026-04-15
 
 ### Added
-- Single-call PROJ pipeline: forward + affine + inverse Mercator collapse
-  into one WASM call via `proj_create`. Falls back to two-call path for
-  compound CRS
-- Global projection support: Robinson, Mollweide, Eckert IV, and other
-  world projections now render correctly
-- Initial test suite and benchmark
-- Local dev server with COOP/COEP headers
-
-### Fixed
-- Aspect ratio distortion on global projections: tile-local Y was encoded
-  linear in latitude instead of Mercator Y. Uniform affine scale now preserves
-  aspect ratio
-- Broken geometry at low zoom: pre-clip features to a
-  90-degree geographic grid before reprojecting, to avoid globe-spanning polygons producing
-  irrecoverable topology errors after reprojection
+- A single-call PROJ pipeline. The forward, affine and inverse Mercator steps
+  run as one `proj_create` pipeline, and a compound CRS uses two calls.
+- World projections, for example Robinson, Mollweide and Eckert IV.
+- A test suite and a benchmark.
 
 ### Changed
-- `getWorldBounds` computes correct reprojected extent
-- Inverse Mercator transform shared as singleton (minor performance
-  improvement)
-- proj-wasm bumped to `^0.1.0-alpha8` (PROJ 9.8.0 to 9.8.1)
+- proj-wasm ^0.1.0-alpha8 (PROJ 9.8.1).
+- The inverse Mercator transform is shared.
 
-### Known Limitations
-- Interrupted projections (Goode Homolosine, etc.) are not supported
+### Fixed
+- World projections had a distorted aspect ratio, because tile-local y was
+  linear in latitude. It is now Mercator y.
+- Geometry broke at low zoom. Features are now clipped to a 90-degree
+  geographic grid before the reprojection.
+- `getWorldBounds` gave an incorrect reprojected extent.
+
+### Known limitations
+- Interrupted projections, for example Goode Homolosine, are not supported.
 
 ## [0.0.3] - 2026-03-15
 
 ### Changed
-- `transformCoordsF64()` is now the sole transform engine; `transformCoords()` delegates to it. Both are exported.
-- `reprojectGeoJSON()` uses `Float64Array` internally, eliminating intermediate `[number,number][]` allocations
-- Clip envelope built via `createEnvelope()`/`toGeometry()` instead of GeoJSONReader parse
-- Clip fully-inside check expanded with 1% buffer to skip more geometric intersections
-- Validity repair (`GeometryFixer.fix`) skipped for point geometries
-- Finer-grained profiling breakdown (isValid vs fixRepair, geojsonRead/Write, densify ratio)
-- Made `proj-wasm` a dependency of backproj, made `backproj` a dependency of maplibre-proj
+- `transformCoordsF64()` is the transform engine, and `transformCoords()` calls
+  it. Both are exported.
+- `reprojectGeoJSON()` uses a `Float64Array` internally.
+- Faster clipping. The clip envelope comes from `createEnvelope()`, a 1% buffer
+  lets more features skip the intersection, and points skip `GeometryFixer`.
+- `proj-wasm` is a dependency of backproj, and `backproj` is a dependency of
+  maplibre-proj.
 
 ### Removed
-- `reprojectTile()` standalone function — use `createTileProcessor().reprojectTile()` instead
-- `mvt.ts` module removed; `FetchTileFn` and `OutputFeature` types now exported from `mvt-pipeline.ts`
+- The standalone `reprojectTile()`. Use `createTileProcessor().reprojectTile()`.
+- The `mvt.ts` module. `FetchTileFn` and `OutputFeature` come from
+  `mvt-pipeline.ts`.
 
 ## [0.0.2] - 2026-03-11
 
 ### Added
-- MVT reprojection via worker pool with input/output tile caching
-- Demo page shows both GeoJSON and MVT layers with data mode selector
-- Debug tile boundary overlay via `reprojectStyle` `tileBoundaries` option
-- `__DEV__` build split: prod builds eliminate all profiling code
-
-### Fixed
-- Protocol handler errors on CRS change (stale protocol removed before MapLibre finished with it)
+- MVT reprojection through a worker pool, with input and output tile caches.
+- A `tileBoundaries` option of `reprojectStyle` that draws the tile
+  boundaries.
+- A `__DEV__` build flag. Production builds contain no profiling code.
+- The demo page shows GeoJSON and MVT layers, with a data mode selector.
 
 ### Changed
-- wasmts dependency updated to 0.1.0-alpha4
-- Demo page loads wasmts from CDN via import map instead of local script tag
+- wasmts 0.1.0-alpha4.
+- The demo page loads wasmts from a CDN through an import map.
+
+### Fixed
+- A CRS change caused protocol handler errors, because the old protocol was
+  removed before MapLibre was done with it.
 
 ## [0.0.1] - 2026-03-08
 
 ### Added
-- `backproj` core package: projection-agnostic coordinate transformation via proj-wasm
-  - `initProj()`, `buildTransformer(crs)`, `transformCoords()`, `transformPoint()`, `getWorldBounds()`
-  - `reprojectGeoJSON()` for batch reprojection of GeoJSON FeatureCollections
-  - Accepts EPSG/ESRI codes, PROJ strings, WKT, PROJJSON
-  - Rejects geographic CRS and interrupted projections at build time
-  - Antimeridian-crossing and non-finite coordinate filtering (per-ring, handles MultiPolygon correctly)
-- `maplibre-proj` wrapper package: `reprojectStyle()` reprojects all inline GeoJSON sources in a MapLibre style and returns fake Mercator bounds for `fitBounds()`
-- npm workspaces monorepo structure
-- Browser demo page (`docs/index.html`)
-  - CRS selector with searchable PROJ database browser and manual input mode (PROJ strings, WKT, .prj upload)
-  - GeoJSON layer management: add by URL, upload file, remove, per-layer color/opacity
-  - Default layers: Natural Earth 110m land, graticules, and countries
-  - coi-serviceworker for SharedArrayBuffer on static hosting
+- `backproj`: coordinate transformation through proj-wasm, for any projected
+  CRS.
+  - `initProj()`, `buildTransformer(crs)`, `transformCoords()`,
+    `transformPoint()` and `getWorldBounds()`.
+  - `reprojectGeoJSON()` reprojects a GeoJSON FeatureCollection.
+  - A CRS can be an EPSG or ESRI code, a PROJ string, WKT or PROJJSON.
+    Geographic CRSs and interrupted projections are rejected.
+  - Coordinates that cross the antimeridian or are not finite are filtered
+    for each ring.
+- `maplibre-proj`: `reprojectStyle()` reprojects the inline GeoJSON sources of
+  a MapLibre style, and returns Mercator bounds for `fitBounds()`.
+- A demo page (`docs/index.html`) with a CRS picker and GeoJSON layer
+  controls.
 
+[Unreleased]: https://github.com/willcohen/backproj/compare/0.0.5...HEAD
 [0.0.5]: https://github.com/willcohen/backproj/compare/0.0.4...0.0.5
 [0.0.4]: https://github.com/willcohen/backproj/compare/0.0.3...0.0.4
 [0.0.3]: https://github.com/willcohen/backproj/compare/0.0.2...0.0.3
 [0.0.2]: https://github.com/willcohen/backproj/compare/0.0.1...0.0.2
-[0.0.1]: https://github.com/willcohen/backproj/compare/0.0.1
+[0.0.1]: https://github.com/willcohen/backproj/tree/0.0.1
