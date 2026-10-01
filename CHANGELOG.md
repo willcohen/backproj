@@ -4,6 +4,8 @@ conventions of [keepachangelog.com](http://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-09-30
+
 ### Changed
 - **Breaking:** needs ffi-wasm 0.0.3 and proj-wasm 0.1.0. A page maps only
   `ffi-wasm`, not its subpaths.
@@ -129,7 +131,8 @@ conventions of [keepachangelog.com](http://keepachangelog.com/).
 - A demo page (`docs/index.html`) with a CRS picker and GeoJSON layer
   controls.
 
-[Unreleased]: https://github.com/willcohen/backproj/compare/0.0.6...HEAD
+[Unreleased]: https://github.com/willcohen/backproj/compare/0.0.7...HEAD
+[0.0.7]: https://github.com/willcohen/backproj/compare/0.0.6...0.0.7
 [0.0.6]: https://github.com/willcohen/backproj/compare/0.0.5...0.0.6
 [0.0.5]: https://github.com/willcohen/backproj/compare/0.0.4...0.0.5
 [0.0.4]: https://github.com/willcohen/backproj/compare/0.0.3...0.0.4
